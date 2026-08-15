@@ -5,9 +5,41 @@ import psutil
 import time
 from typing import List, Tuple
 from pathlib import Path
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Record bot start time
 BOT_START_TIME = time.time()
+
+def get_persistent_keyboard(chat_title: str = "Новый диалог") -> ReplyKeyboardMarkup:
+    """
+    Returns a persistent bottom keyboard indicating the current active chat
+    with quick action buttons.
+    """
+    clean_title = (chat_title[:16] + "..") if len(chat_title) > 16 else chat_title
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=f"💬 {clean_title}"),
+                KeyboardButton(text="➕ Новый чат"),
+            ],
+            [
+                KeyboardButton(text="🌲 Файлы /tree"),
+                KeyboardButton(text="📊 Статус"),
+                KeyboardButton(text="⚙️ Меню"),
+            ]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+
+def get_chat_badge(conv_title: str, cwd: str) -> str:
+    """
+    Returns a formatted header badge indicating the active chat context and working directory.
+    """
+    short_cwd = cwd if len(cwd) <= 25 else "..." + cwd[-22:]
+    return f"💬 <b>[{html.escape(conv_title)}]</b> <i>({html.escape(short_cwd)})</i>\n──────────────\n"
+
 
 def markdown_to_html(text: str) -> str:
     """
@@ -124,7 +156,7 @@ def extract_media_files(text: str) -> List[Tuple[str, str]]:
         seen.add(clean_path)
         
         p = Path(clean_path)
-        if p.is_file() and p.exists():
+        if p.exists() and p.is_file():
             ext = p.suffix.lower()
             if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
                 found.append((str(p), "image"))

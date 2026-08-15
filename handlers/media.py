@@ -6,7 +6,7 @@ from aiogram.types import FSInputFile
 
 import config
 from session_manager import session_manager
-from utils import markdown_to_html, split_message, extract_media_files
+from utils import markdown_to_html, split_message, extract_media_files, get_persistent_keyboard, get_chat_badge
 from agent_runner import AgentRunner
 
 router = Router()
@@ -22,7 +22,13 @@ async def handle_photo(message: types.Message, bot: Bot):
     filename = f"photo_{timestamp}_{photo.file_unique_id}.jpg"
     file_path = config.UPLOADS_DIR / filename
     
-    status_msg = await message.answer("📥 <i>Загружаю и обрабатываю изображение...</i>", parse_mode="HTML")
+    active_conv = session.get_active_conv()
+    initial_title = active_conv.title if active_conv else "Новый диалог"
+
+    status_msg = await message.answer(
+        f"📥 <i>[Чат: «{initial_title}»] Загружаю и анализирую изображение...</i>",
+        parse_mode="HTML"
+    )
     
     try:
         # Download from Telegram
@@ -37,7 +43,7 @@ async def handle_photo(message: types.Message, bot: Bot):
         
         async def update_status(text: str):
             try:
-                await status_msg.edit_text(text, parse_mode="HTML")
+                await status_msg.edit_text(f"<i>[Чат: «{initial_title}»]</i>\n{text}", parse_mode="HTML")
             except Exception:
                 pass
 
@@ -46,6 +52,13 @@ async def handle_photo(message: types.Message, bot: Bot):
         
         result = await runner.run()
         resp_text = result.get("response", "") or "Ответ пуст."
+        conv_id = result.get("conversation_id")
+        
+        session_manager.record_turn(user_id, caption, conv_id)
+        
+        updated_conv = session.get_active_conv()
+        current_title = updated_conv.title if updated_conv else "Диалог"
+
         html_resp = markdown_to_html(resp_text)
         
         try:
@@ -54,13 +67,20 @@ async def handle_photo(message: types.Message, bot: Bot):
             pass
             
         chunks = split_message(html_resp)
-        for chunk in chunks:
-            await message.answer(chunk, parse_mode="HTML")
+        if chunks:
+            badge = get_chat_badge(current_title, session.cwd)
+            chunks[0] = badge + chunks[0]
+
+        reply_kb = get_persistent_keyboard(current_title)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            kb = reply_kb if is_last else None
+            await message.answer(chunk, parse_mode="HTML", reply_markup=kb)
 
         # Check for generated / referenced output media files
         media_files = extract_media_files(resp_text)
         for mpath, mtype in media_files:
-            # Don't re-upload the same input file
             if os.path.abspath(mpath) == os.path.abspath(str(file_path)):
                 continue
             p = Path(mpath)
@@ -87,11 +107,16 @@ async def handle_document(message: types.Message, bot: Bot):
     doc = message.document
     
     orig_name = doc.file_name or f"doc_{int(time.time())}.dat"
-    # Clean filename
     safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._- ")
     file_path = config.UPLOADS_DIR / safe_name
     
-    status_msg = await message.answer(f"📥 <i>Загружаю документ: {safe_name}...</i>", parse_mode="HTML")
+    active_conv = session.get_active_conv()
+    initial_title = active_conv.title if active_conv else "Новый диалог"
+
+    status_msg = await message.answer(
+        f"📥 <i>[Чат: «{initial_title}»] Загружаю документ: {safe_name}...</i>",
+        parse_mode="HTML"
+    )
     
     try:
         await bot.download(doc, destination=file_path)
@@ -104,7 +129,7 @@ async def handle_document(message: types.Message, bot: Bot):
         
         async def update_status(text: str):
             try:
-                await status_msg.edit_text(text, parse_mode="HTML")
+                await status_msg.edit_text(f"<i>[Чат: «{initial_title}»]</i>\n{text}", parse_mode="HTML")
             except Exception:
                 pass
 
@@ -113,6 +138,13 @@ async def handle_document(message: types.Message, bot: Bot):
         
         result = await runner.run()
         resp_text = result.get("response", "") or "Ответ пуст."
+        conv_id = result.get("conversation_id")
+        
+        session_manager.record_turn(user_id, caption, conv_id)
+        
+        updated_conv = session.get_active_conv()
+        current_title = updated_conv.title if updated_conv else "Диалог"
+
         html_resp = markdown_to_html(resp_text)
         
         try:
@@ -121,8 +153,16 @@ async def handle_document(message: types.Message, bot: Bot):
             pass
             
         chunks = split_message(html_resp)
-        for chunk in chunks:
-            await message.answer(chunk, parse_mode="HTML")
+        if chunks:
+            badge = get_chat_badge(current_title, session.cwd)
+            chunks[0] = badge + chunks[0]
+
+        reply_kb = get_persistent_keyboard(current_title)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            kb = reply_kb if is_last else None
+            await message.answer(chunk, parse_mode="HTML", reply_markup=kb)
 
         # Check for generated / referenced output media files
         media_files = extract_media_files(resp_text)

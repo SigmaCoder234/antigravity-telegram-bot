@@ -6,7 +6,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 
 import config
 from session_manager import session_manager
-from utils import get_system_info
+from utils import get_system_info, get_persistent_keyboard
 from shell_runner import ShellRunner
 from file_explorer import generate_ascii_tree, get_explorer_keyboard
 
@@ -96,9 +96,10 @@ async def cb_chats(callback: types.CallbackQuery):
 
     text = (
         f"💬 <b>Управление диалогами (чатами):</b>\n\n"
-        f"Текущий активный чат: <b>{active_title}</b>\n"
-        f"Выберите нужный диалог из списка ниже, чтобы переключиться на него, "
-        f"или создайте новый:"
+        f"🟢 <b>Вы сейчас в чате:</b> «{active_title}»\n"
+        f"📂 <b>Рабочая папка:</b> <code>{session.cwd}</code>\n\n"
+        f"<i>Выберите другой диалог из списка ниже, чтобы переключиться на него, "
+        f"или создайте новый:</i>"
     )
     await callback.answer()
     try:
@@ -117,6 +118,12 @@ async def cb_switch_chat(callback: types.CallbackQuery):
         title = conv.title if conv else "Диалог"
         await callback.answer(f"Переключено на '{title}'!")
         await cb_chats(callback)
+        await callback.message.answer(
+            f"🟢 <b>Активный чат изменен:</b> «{title}»\n"
+            f"📂 <b>Рабочая папка:</b> <code>{session.cwd}</code>",
+            parse_mode="HTML",
+            reply_markup=get_persistent_keyboard(title)
+        )
     else:
         await callback.answer("Диалог не найден.")
 
@@ -128,10 +135,11 @@ async def cb_new(callback: types.CallbackQuery):
     session = session_manager.get_session(user_id)
     await callback.answer("Создан новый диалог!")
     await callback.message.answer(
-        f"✨ <b>Создан новый чистый диалог!</b>\n"
-        f"Рабочая директория: <code>{session.cwd}</code>\n"
-        f"Все ваши предыдущие чаты сохранены в <code>/chats</code>.",
-        parse_mode="HTML"
+        f"✨ <b>Создан новый чистый диалог:</b> «{conv.title}»\n"
+        f"📂 Рабочая папка: <code>{session.cwd}</code>\n"
+        f"<i>Все ваши предыдущие чаты сохранены в <code>/chats</code>.</i>",
+        parse_mode="HTML",
+        reply_markup=get_persistent_keyboard("Новый диалог")
     )
 
 
@@ -142,7 +150,14 @@ async def cb_delete_chat(callback: types.CallbackQuery):
     if session.active_conv_id:
         session_manager.delete_conversation(user_id, session.active_conv_id)
         await callback.answer("Диалог удален.")
+        active_conv = session.get_active_conv()
+        title = active_conv.title if active_conv else "Новый диалог"
         await cb_chats(callback)
+        await callback.message.answer(
+            f"🗑 <b>Диалог удален.</b>\nТекущий активный чат: «{title}»",
+            parse_mode="HTML",
+            reply_markup=get_persistent_keyboard(title)
+        )
     else:
         await callback.answer("Нет активного диалога.")
 
@@ -354,7 +369,7 @@ async def cb_status(callback: types.CallbackQuery):
         f"• Диск: <code>{sys_info['disk_free_gb']} GB свободно / {sys_info['disk_total_gb']} GB ({sys_info['disk_percent']}%)</code>\n"
         f"• Аптайм бота: <code>{sys_info['uptime']}</code>\n\n"
         f"<b>🤖 Сессия агента:</b>\n"
-        f"• Активный чат: <b>{conv_title}</b> (всего: {len(session.conversations)})\n"
+        f"• Активный чат: <b>💬 {conv_title}</b> (всего: {len(session.conversations)})\n"
         f"• Активная операция: <b>{active_op}</b>\n"
         f"• Модель: <code>{session.model}</code> ({session.effort})\n"
         f"• Режим: <code>{session.mode}</code>\n"

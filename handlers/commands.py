@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 
 import config
 from session_manager import session_manager
-from utils import markdown_to_html, split_message, get_system_info
+from utils import markdown_to_html, split_message, get_system_info, get_persistent_keyboard, get_chat_badge
 from agent_runner import AgentRunner
 from shell_runner import ShellRunner
 from file_explorer import generate_ascii_tree, get_explorer_keyboard
@@ -82,15 +82,21 @@ async def cmd_start(message: types.Message):
         f"👋 <b>Привет, {message.from_user.full_name}!</b>\n\n"
         f"Я твой персональный Telegram-мост к ИИ-агенту <b>Antigravity</b>.\n"
         f"Ты можешь отправлять мне задачи, файлы, фотографии и команды для выполнения на сервере.\n\n"
-        f"📌 <b>Текущие параметры:</b>\n"
-        f"• Активный диалог: <b>{conv_title}</b>\n"
+        f"📌 <b>Текущее окружение:</b>\n"
+        f"• Активный чат: <b>💬 {conv_title}</b>\n"
         f"• Модель: <code>{session.model}</code>\n"
         f"• Уровень размышлений: <code>{session.effort}</code>\n"
         f"• Рабочая папка: <code>{session.cwd}</code>\n"
         f"• Режим: <code>{'Автопилот ⚡' if session.mode == 'auto' else 'Ручное подтверждение 🛡️'}</code>\n\n"
-        f"💡 <i>Используйте кнопки меню ниже или отправьте запрос в чат!</i>"
+        f"💡 <i>Внизу всегда закреплены быстрые кнопки с названием текущего чата!</i>"
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+    # Send persistent keyboard first to attach to the bottom
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=get_persistent_keyboard(conv_title)
+    )
+    await message.answer("⚙️ <b>Панель управления:</b>", reply_markup=get_main_keyboard())
 
 
 @router.message(Command("chats", "history"))
@@ -102,11 +108,16 @@ async def cmd_chats(message: types.Message):
 
     text = (
         f"💬 <b>Управление диалогами (чатами):</b>\n\n"
-        f"Текущий активный чат: <b>{active_title}</b>\n"
-        f"Выберите нужный диалог из списка ниже, чтобы переключиться на него, "
-        f"или создайте новый:"
+        f"🟢 <b>Вы сейчас в чате:</b> «{active_title}»\n"
+        f"📂 <b>Рабочая папка:</b> <code>{session.cwd}</code>\n\n"
+        f"<i>Выберите другой диалог из списка ниже, чтобы переключить контекст, "
+        f"или создайте новый:</i>"
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=get_chats_keyboard(user_id))
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=get_chats_keyboard(user_id)
+    )
 
 
 @router.message(Command("tree", "files"))
@@ -165,10 +176,11 @@ async def cmd_new(message: types.Message):
     conv = session_manager.create_new_conversation(user_id, title="Новый диалог")
     session = session_manager.get_session(user_id)
     await message.answer(
-        f"✨ <b>Создан новый диалог!</b>\n"
-        f"Рабочая директория: <code>{session.cwd}</code>\n"
-        f"История предыдущих чатов сохранена в <code>/chats</code>.",
-        parse_mode="HTML"
+        f"✨ <b>Создан новый чистый диалог:</b> «{conv.title}»\n"
+        f"📂 Рабочая папка: <code>{session.cwd}</code>\n\n"
+        f"<i>Все ваши предыдущие чаты сохранены в <code>/chats</code>.</i>",
+        parse_mode="HTML",
+        reply_markup=get_persistent_keyboard("Новый диалог")
     )
 
 
@@ -194,10 +206,9 @@ async def cmd_status(message: types.Message):
         f"• Диск: <code>{sys_info['disk_free_gb']} GB свободно / {sys_info['disk_total_gb']} GB ({sys_info['disk_percent']}%)</code>\n"
         f"• Аптайм бота: <code>{sys_info['uptime']}</code>\n\n"
         f"<b>🤖 Сессия агента:</b>\n"
-        f"• Активный чат: <b>{conv_title}</b> (всего чатов: {len(session.conversations)})\n"
+        f"• Активный чат: <b>💬 {conv_title}</b> (всего: {len(session.conversations)})\n"
         f"• Активная операция: <b>{active_op}</b>\n"
-        f"• Модель: <code>{session.model}</code>\n"
-        f"• Уровень размышлений: <code>{session.effort}</code>\n"
+        f"• Модель: <code>{session.model}</code> ({session.effort})\n"
         f"• Режим: <code>{session.mode}</code>\n"
         f"• Рабочий каталог: <code>{session.cwd}</code>\n"
         f"• Conversation ID: <code>{session.conversation_id or '—'}</code>"
