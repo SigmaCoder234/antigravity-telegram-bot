@@ -1,0 +1,18 @@
+# Secrets and environment
+.env
+
+# Session data and logs
+data/sessions.json
+data/*.log
+data/*.pid
+
+# Uploaded user files
+workspace/uploads/*
+!workspace/uploads/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
