@@ -1,6 +1,8 @@
 import os
 import shutil
 import asyncio
+import html
+import time
 from pathlib import Path
 from aiogram import Router, types
 from aiogram.filters import Command, CommandObject
@@ -8,10 +10,19 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 
 import config
 from session_manager import session_manager
-from utils import markdown_to_html, split_message, get_system_info, get_persistent_keyboard, get_chat_badge
-from agent_runner import AgentRunner
+from utils import (
+    markdown_to_html,
+    split_message,
+    get_system_info,
+    get_persistent_keyboard,
+    get_response_inline_keyboard,
+    get_chat_badge,
+    safe_reply
+)
+from agent_runner import AgentRunner, is_effort_supported_for_model
 from shell_runner import ShellRunner
 from file_explorer import generate_ascii_tree, get_explorer_keyboard
+from quota_manager import quota_manager
 
 router = Router()
 
@@ -46,11 +57,12 @@ def get_chats_keyboard(user_id: int) -> InlineKeyboardMarkup:
     for c in convs[:8]:
         is_active = (c.id == session.active_conv_id)
         prefix = "🟢 " if is_active else "💬 "
-        title_snippet = (c.title[:24] + "..") if len(c.title) > 24 else c.title
-        count_str = f" ({c.message_count} сообщ.)" if c.message_count > 0 else ""
+        active_tag = " (активен)" if is_active else ""
+        title_snippet = (c.title[:20] + "..") if len(c.title) > 20 else c.title
+        count_str = f" [{c.message_count}]" if c.message_count > 0 else ""
         buttons.append([
             InlineKeyboardButton(
-                text=f"{prefix}{title_snippet}{count_str}",
+                text=f"{prefix}{title_snippet}{count_str}{active_tag}",
                 callback_data=f"switch_chat:{c.id}"
             )
         ])
@@ -78,25 +90,26 @@ async def cmd_start(message: types.Message):
     active_conv = session.get_active_conv()
     conv_title = active_conv.title if active_conv else "Новый диалог"
     
+    effort_info = session.effort if is_effort_supported_for_model(session.model) else "авто"
     text = (
-        f"👋 <b>Привет, {message.from_user.full_name}!</b>\n\n"
+        f"👋 <b>Привет, {html.escape(message.from_user.full_name)}!</b>\n\n"
         f"Я твой персональный Telegram-мост к ИИ-агенту <b>Antigravity</b>.\n"
         f"Ты можешь отправлять мне задачи, файлы, фотографии и команды для выполнения на сервере.\n\n"
         f"📌 <b>Текущее окружение:</b>\n"
-        f"• Активный чат: <b>💬 {conv_title}</b>\n"
-        f"• Модель: <code>{session.model}</code>\n"
-        f"• Уровень размышлений: <code>{session.effort}</code>\n"
-        f"• Рабочая папка: <code>{session.cwd}</code>\n"
+        f"• Активный чат: <b>💬 {html.escape(conv_title)}</b>\n"
+        f"• Модель: <code>{html.escape(session.model)}</code>\n"
+        f"• Уровень размышлений: <code>{html.escape(effort_info)}</code>\n"
+        f"• Рабочая папка: <code>{html.escape(session.cwd)}</code>\n"
         f"• Режим: <code>{'Автопилот ⚡' if session.mode == 'auto' else 'Ручное подтверждение 🛡️'}</code>\n\n"
-        f"💡 <i>Внизу всегда закреплены быстрые кнопки с названием текущего чата!</i>"
+        f"💡 <i>Внизу экрана закреплена кнопка с названием вашего текущего чата!</i>"
     )
     # Send persistent keyboard first to attach to the bottom
-    await message.answer(
+    await safe_reply(
+        message,
         text,
-        parse_mode="HTML",
         reply_markup=get_persistent_keyboard(conv_title)
     )
-    await message.answer("⚙️ <b>Панель управления:</b>", reply_markup=get_main_keyboard())
+    await safe_reply(message, "⚙️ <b>Панель управления:</b>", reply_markup=get_main_keyboard())
 
 
 @router.message(Command("chats", "history"))
@@ -108,14 +121,14 @@ async def cmd_chats(message: types.Message):
 
     text = (
         f"💬 <b>Управление диалогами (чатами):</b>\n\n"
-        f"🟢 <b>Вы сейчас в чате:</b> «{active_title}»\n"
-        f"📂 <b>Рабочая папка:</b> <code>{session.cwd}</code>\n\n"
+        f"🟢 <b>Вы сейчас в чате:</b> «{html.escape(active_title)}»\n"
+        f"📂 <b>Рабочая папка:</b> <code>{html.escape(session.cwd)}</code>\n\n"
         f"<i>Выберите другой диалог из списка ниже, чтобы переключить контекст, "
         f"или создайте новый:</i>"
     )
-    await message.answer(
+    await safe_reply(
+        message,
         text,
-        parse_mode="HTML",
         reply_markup=get_chats_keyboard(user_id)
     )
 
@@ -128,7 +141,7 @@ async def cmd_tree(message: types.Message, command: CommandObject):
     target_dir = Path(arg).resolve() if arg else Path(session.cwd)
 
     if not target_dir.exists() or not target_dir.is_dir():
-        await message.answer(f"❌ Директория не найдена: <code>{target_dir}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ Директория не найдена: <code>{html.escape(str(target_dir))}</code>")
         return
 
     tree_text = generate_ascii_tree(target_dir, max_depth=2, max_entries=12)
@@ -137,11 +150,11 @@ async def cmd_tree(message: types.Message, command: CommandObject):
     escaped_tree = tree_text.replace("<", "&lt;").replace(">", "&gt;")
     text = (
         f"🌲 <b>Файловая система сервера:</b>\n"
-        f"📍 Каталог: <code>{target_dir}</code>\n\n"
+        f"📍 Каталог: <code>{html.escape(str(target_dir))}</code>\n\n"
         f"<pre><code>{escaped_tree}</code></pre>\n"
         f"<i>Нажмите на папку ниже для перехода внутрь или сделайте ее рабочей:</i>"
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    await safe_reply(message, text, reply_markup=keyboard)
 
 
 @router.message(Command("help"))
@@ -161,13 +174,14 @@ async def cmd_help(message: types.Message):
         "• <code>/getfile &lt;путь&gt;</code> — Скачать файл с сервера в Telegram\n"
         "• <code>/exec &lt;команда&gt;</code> — Прямой запуск Bash с интерактивными кнопками [y/N]\n"
         "• <code>/status</code> — Нагрузка сервера (CPU, RAM, Диск) и статус агента\n"
+        "• <code>/quota</code> — Статус квоты и проверка доступности\n"
         "• <code>/stop</code> — Прервать выполнение активной операции\n\n"
         "<b>🔹 Настройки агента:</b>\n"
         "• <code>/model</code> — Выбор языковой модели (Gemini 3.7 Flash, Claude Sonnet 4.6 и др.)\n"
         "• <code>/effort</code> — Глубина размышлений (Low, Medium, High)\n"
         "• <code>/mode</code> — Автопилот / Ручное подтверждение"
     )
-    await message.answer(text, parse_mode="HTML")
+    await safe_reply(message, text)
 
 
 @router.message(Command("new", "reset"))
@@ -175,11 +189,11 @@ async def cmd_new(message: types.Message):
     user_id = message.from_user.id
     conv = session_manager.create_new_conversation(user_id, title="Новый диалог")
     session = session_manager.get_session(user_id)
-    await message.answer(
-        f"✨ <b>Создан новый чистый диалог:</b> «{conv.title}»\n"
-        f"📂 Рабочая папка: <code>{session.cwd}</code>\n\n"
+    await safe_reply(
+        message,
+        f"✨ <b>Создан новый чистый диалог:</b> «{html.escape(conv.title)}»\n"
+        f"📂 Рабочая папка: <code>{html.escape(session.cwd)}</code>\n\n"
         f"<i>Все ваши предыдущие чаты сохранены в <code>/chats</code>.</i>",
-        parse_mode="HTML",
         reply_markup=get_persistent_keyboard("Новый диалог")
     )
 
@@ -197,6 +211,14 @@ async def cmd_status(message: types.Message):
         active_op = "Выполняется задача ИИ 🤖"
     elif session.active_task and not session.active_task.done():
         active_op = "Выполняется фоновый процесс ⚙️"
+
+    quota_info = await quota_manager.get_quota_info(user_id, session.model)
+    quota_status = "✅ В норме (доступна)"
+    if quota_info:
+        rem = max(0, int(quota_info["estimated_reset_at"] - time.time()))
+        quota_status = f"⏳ Ожидание сброса (~{rem} сек.)"
+
+    effort_str = session.effort if is_effort_supported_for_model(session.model) else f"{session.effort} (встроенный)"
         
     text = (
         f"📊 <b>Статус системы и агента:</b>\n\n"
@@ -206,14 +228,38 @@ async def cmd_status(message: types.Message):
         f"• Диск: <code>{sys_info['disk_free_gb']} GB свободно / {sys_info['disk_total_gb']} GB ({sys_info['disk_percent']}%)</code>\n"
         f"• Аптайм бота: <code>{sys_info['uptime']}</code>\n\n"
         f"<b>🤖 Сессия агента:</b>\n"
-        f"• Активный чат: <b>💬 {conv_title}</b> (всего: {len(session.conversations)})\n"
+        f"• Активный чат: <b>💬 {html.escape(conv_title)}</b> (всего: {len(session.conversations)})\n"
         f"• Активная операция: <b>{active_op}</b>\n"
-        f"• Модель: <code>{session.model}</code> ({session.effort})\n"
+        f"• Модель: <code>{html.escape(session.model)}</code> ({html.escape(effort_str)})\n"
+        f"• Статус квоты: <b>{quota_status}</b>\n"
         f"• Режим: <code>{session.mode}</code>\n"
-        f"• Рабочий каталог: <code>{session.cwd}</code>\n"
+        f"• Рабочий каталог: <code>{html.escape(session.cwd)}</code>\n"
         f"• Conversation ID: <code>{session.conversation_id or '—'}</code>"
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
+    await safe_reply(message, text, reply_markup=get_main_keyboard())
+
+
+@router.message(Command("quota"))
+async def cmd_quota(message: types.Message):
+    user_id = message.from_user.id
+    session = session_manager.get_session(user_id)
+    
+    quota_info = await quota_manager.get_quota_info(user_id, session.model)
+    if quota_info:
+        rem = max(0, int(quota_info["estimated_reset_at"] - time.time()))
+        text = (
+            f"⏳ <b>Статус квоты для модели {html.escape(session.model)}:</b>\n\n"
+            f"Лимит запросов исчерпан. Ожидаем сброса квоты.\n"
+            f"• Примерное время до проверки: <b>~{rem} сек.</b>\n"
+            f"• Уведомление: <i>бот автоматически напишет вам сюда, как только квота станет доступна!</i>"
+        )
+    else:
+        text = (
+            f"✅ <b>Квота доступна!</b>\n\n"
+            f"Модель: <code>{html.escape(session.model)}</code>\n"
+            f"Ограничений по квоте не зафиксировано."
+        )
+    await safe_reply(message, text)
 
 
 @router.message(Command("model"))
@@ -227,13 +273,20 @@ async def cmd_model(message: types.Message):
         buttons.append([InlineKeyboardButton(text=f"{prefix}{mlabel}", callback_data=f"set_model:{mid}")])
     
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer(f"🧠 <b>Выберите модель ИИ</b> (сейчас: <code>{session.model}</code>):", parse_mode="HTML", reply_markup=markup)
+    await safe_reply(
+        message,
+        f"🧠 <b>Выберите модель ИИ</b> (сейчас: <code>{html.escape(session.model)}</code>):",
+        reply_markup=markup
+    )
 
 
 @router.message(Command("effort"))
 async def cmd_effort(message: types.Message):
     user_id = message.from_user.id
     session = session_manager.get_session(user_id)
+    
+    supports_eff = is_effort_supported_for_model(session.model)
+    note = "" if supports_eff else f"\n\n<i>⚠️ Для текущей модели <code>{html.escape(session.model)}</code> уровень размышлений зафиксирован.</i>"
     
     efforts = [
         ("low", "Low (Быстрый ответ) ⚡"),
@@ -246,7 +299,11 @@ async def cmd_effort(message: types.Message):
         buttons.append([InlineKeyboardButton(text=f"{prefix}{elabel}", callback_data=f"set_effort:{eid}")])
         
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer(f"⚡ <b>Выберите уровень рассуждений:</b>", parse_mode="HTML", reply_markup=markup)
+    await safe_reply(
+        message,
+        f"⚡ <b>Выберите уровень рассуждений:</b>{note}",
+        reply_markup=markup
+    )
 
 
 @router.message(Command("mode"))
@@ -264,14 +321,14 @@ async def cmd_mode(message: types.Message):
         buttons.append([InlineKeyboardButton(text=f"{prefix}{mlabel}", callback_data=f"set_mode:{mid}")])
         
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer(f"⚙️ <b>Режим исполнения действий агентом:</b>", parse_mode="HTML", reply_markup=markup)
+    await safe_reply(message, f"⚙️ <b>Режим исполнения действий агентом:</b>", reply_markup=markup)
 
 
 @router.message(Command("pwd", "cwd"))
 async def cmd_pwd(message: types.Message):
     user_id = message.from_user.id
     session = session_manager.get_session(user_id)
-    await message.answer(f"📂 Текущий рабочий каталог: <code>{session.cwd}</code>", parse_mode="HTML")
+    await safe_reply(message, f"📂 Текущий рабочий каталог: <code>{html.escape(session.cwd)}</code>")
 
 
 @router.message(Command("cd"))
@@ -279,7 +336,7 @@ async def cmd_cd(message: types.Message, command: CommandObject):
     user_id = message.from_user.id
     arg = (command.args or "").strip()
     if not arg:
-        await message.answer("⚠️ Укажите путь к папке: <code>/cd /путь/к/каталогу</code> или используйте <code>/tree</code>", parse_mode="HTML")
+        await safe_reply(message, "⚠️ Укажите путь к папке: <code>/cd /путь/к/каталогу</code> или используйте <code>/tree</code>")
         return
     
     session = session_manager.get_session(user_id)
@@ -287,9 +344,9 @@ async def cmd_cd(message: types.Message, command: CommandObject):
     target_path = target_path.resolve()
     
     if session_manager.set_cwd(user_id, str(target_path)):
-        await message.answer(f"✅ Рабочий каталог изменен на: <code>{target_path}</code>", parse_mode="HTML")
+        await safe_reply(message, f"✅ Рабочий каталог изменен на: <code>{html.escape(str(target_path))}</code>")
     else:
-        await message.answer(f"❌ Каталог не найден: <code>{target_path}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ Каталог не найден: <code>{html.escape(str(target_path))}</code>")
 
 
 @router.message(Command("ls"))
@@ -300,24 +357,24 @@ async def cmd_ls(message: types.Message, command: CommandObject):
     target_dir = Path(arg).resolve() if arg else Path(session.cwd)
     
     if not target_dir.exists() or not target_dir.is_dir():
-        await message.answer(f"❌ Каталог не существует: <code>{target_dir}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ Каталог не существует: <code>{html.escape(str(target_dir))}</code>")
         return
         
     try:
         entries = sorted(list(target_dir.iterdir()), key=lambda x: (not x.is_dir(), x.name.lower()))
-        lines = [f"📂 <b>Каталог:</b> <code>{target_dir}</code>\n"]
+        lines = [f"📂 <b>Каталог:</b> <code>{html.escape(str(target_dir))}</code>\n"]
         for entry in entries[:40]:
             if entry.is_dir():
-                lines.append(f"📁 <code>{entry.name}/</code>")
+                lines.append(f"📁 <code>{html.escape(entry.name)}/</code>")
             else:
                 size_str = f"{entry.stat().st_size / 1024:.1f} KB" if entry.stat().st_size > 1024 else f"{entry.stat().st_size} B"
-                lines.append(f"📄 <code>{entry.name}</code> ({size_str})")
+                lines.append(f"📄 <code>{html.escape(entry.name)}</code> ({size_str})")
         if len(entries) > 40:
             lines.append(f"\n<i>... и еще {len(entries) - 40} элементов</i>")
             
-        await message.answer("\n".join(lines), parse_mode="HTML")
+        await safe_reply(message, "\n".join(lines))
     except Exception as e:
-        await message.answer(f"❌ Ошибка чтения каталога: <code>{e}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ Ошибка чтения каталога: <code>{html.escape(str(e))}</code>")
 
 
 @router.message(Command("getfile"))
@@ -326,25 +383,25 @@ async def cmd_getfile(message: types.Message, command: CommandObject):
     session = session_manager.get_session(user_id)
     arg = (command.args or "").strip()
     if not arg:
-        await message.answer("⚠️ Укажите путь к файлу: <code>/getfile /путь/к/файлу</code>", parse_mode="HTML")
+        await safe_reply(message, "⚠️ Укажите путь к файлу: <code>/getfile /путь/к/файлу</code>")
         return
         
     p = Path(session.cwd) / arg if not arg.startswith("/") else Path(arg)
     p = p.resolve()
     
     if not p.exists() or not p.is_file():
-        await message.answer(f"❌ Файл не найден: <code>{p}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ Файл не найден: <code>{html.escape(str(p))}</code>")
         return
         
     try:
         ext = p.suffix.lower()
         input_file = FSInputFile(str(p), filename=p.name)
         if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
-            await message.answer_photo(photo=input_file, caption=f"📸 <code>{p.name}</code>", parse_mode="HTML")
+            await message.answer_photo(photo=input_file, caption=f"📸 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
         else:
-            await message.answer_document(document=input_file, caption=f"📄 <code>{p.name}</code>", parse_mode="HTML")
+            await message.answer_document(document=input_file, caption=f"📄 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
     except Exception as e:
-        await message.answer(f"❌ Ошибка отправки файла: <code>{e}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ Ошибка отправки файла: <code>{html.escape(str(e))}</code>")
 
 
 @router.message(Command("stop", "cancel"))
@@ -361,9 +418,9 @@ async def cmd_stop(message: types.Message):
         stopped = True
         
     if stopped:
-        await message.answer("🛑 <b>Текущая операция прервана.</b>", parse_mode="HTML")
+        await safe_reply(message, "🛑 <b>Текущая операция прервана.</b>")
     else:
-        await message.answer("ℹ️ Нет активных фоновых задач для остановки.", parse_mode="HTML")
+        await safe_reply(message, "ℹ️ Нет активных фоновых задач для остановки.")
 
 
 @router.message(Command("btw"))
@@ -372,26 +429,33 @@ async def cmd_btw(message: types.Message, command: CommandObject):
     session = session_manager.get_session(user_id)
     arg = (command.args or "").strip()
     if not arg:
-        await message.answer("⚠️ Укажите вопрос: <code>/btw ваш попутный вопрос</code>", parse_mode="HTML")
+        await safe_reply(message, "⚠️ Укажите вопрос: <code>/btw ваш попутный вопрос</code>")
         return
         
-    status_msg = await message.answer("💬 <i>Обрабатываю попутный вопрос...</i>", parse_mode="HTML")
+    status_msg = await safe_reply(message, "💬 <i>Обрабатываю попутный вопрос...</i>")
     
     btw_prompt = f"[Попутный вопрос от пользователя (By-The-Way). Ответь кратко и четко]: {arg}"
-    runner = AgentRunner(session=session, prompt=btw_prompt)
+    runner = AgentRunner(
+        session=session,
+        prompt=btw_prompt,
+        chat_id=message.chat.id
+    )
     session.active_runner = runner
     
     try:
         result = await runner.run()
-        resp_text = result.get("response", "") or "Ответ пуст."
+        resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не сформировал ответа.</i>"
         html_resp = markdown_to_html(resp_text)
         
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         chunks = split_message(html_resp)
         for chunk in chunks:
-            await message.answer(f"💬 <b>Попутный ответ:</b>\n\n{chunk}", parse_mode="HTML")
+            await safe_reply(message, f"💬 <b>Попутный ответ:</b>\n\n{chunk}")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        await safe_reply(message, f"❌ Ошибка: {html.escape(str(e))}")
     finally:
         session.active_runner = None
 
@@ -402,10 +466,10 @@ async def cmd_plan(message: types.Message, command: CommandObject):
     session = session_manager.get_session(user_id)
     arg = (command.args or "").strip()
     if not arg:
-        await message.answer("⚠️ Укажите задачу для планирования: <code>/plan описание задачи</code>", parse_mode="HTML")
+        await safe_reply(message, "⚠️ Укажите задачу для планирования: <code>/plan описание задачи</code>")
         return
         
-    status_msg = await message.answer("📋 <i>Составляю план выполнения...</i>", parse_mode="HTML")
+    status_msg = await safe_reply(message, "📋 <i>Составляю план выполнения...</i>")
     
     async def update_status(text: str):
         try:
@@ -414,7 +478,13 @@ async def cmd_plan(message: types.Message, command: CommandObject):
             pass
 
     plan_prompt = f"[Составь детальный и практический план реализации следующей задачи]: {arg}"
-    runner = AgentRunner(session=session, prompt=plan_prompt, on_status=update_status, extra_flags=["--mode", "plan"])
+    runner = AgentRunner(
+        session=session,
+        prompt=plan_prompt,
+        chat_id=message.chat.id,
+        on_status=update_status,
+        extra_flags=["--mode", "plan"]
+    )
     session.active_runner = runner
     
     try:
@@ -429,9 +499,9 @@ async def cmd_plan(message: types.Message, command: CommandObject):
             
         chunks = split_message(html_resp)
         for chunk in chunks:
-            await message.answer(chunk, parse_mode="HTML")
+            await safe_reply(message, chunk)
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка планирования: {e}")
+        await safe_reply(message, f"❌ Ошибка планирования: {html.escape(str(e))}")
     finally:
         session.active_runner = None
 
@@ -442,19 +512,19 @@ async def cmd_exec(message: types.Message, command: CommandObject):
     session = session_manager.get_session(user_id)
     arg = (command.args or "").strip()
     if not arg:
-        await message.answer("⚠️ Укажите команду: <code>/exec apt update</code> или <code>/exec ls -la</code>", parse_mode="HTML")
+        await safe_reply(message, "⚠️ Укажите команду: <code>/exec apt update</code> или <code>/exec ls -la</code>")
         return
         
-    live_msg = await message.answer(
-        f"💻 <b>Запуск:</b> <code>{arg}</code>\n<i>Ожидание вывода...</i>",
-        parse_mode="HTML"
+    live_msg = await safe_reply(
+        message,
+        f"💻 <b>Запуск:</b> <code>{html.escape(arg)}</code>\n<i>Ожидание вывода...</i>"
     )
 
     async def update_output(preview_text: str):
-        escaped = preview_text.replace("<", "&lt;").replace(">", "&gt;")
+        escaped = html.escape(preview_text)
         try:
             await live_msg.edit_text(
-                f"💻 <b>Выполнение:</b> <code>{arg}</code>\n"
+                f"💻 <b>Выполнение:</b> <code>{html.escape(arg)}</code>\n"
                 f"<pre><code>{escaped}</code></pre>",
                 parse_mode="HTML"
             )
@@ -472,10 +542,10 @@ async def cmd_exec(message: types.Message, command: CommandObject):
                 InlineKeyboardButton(text="⏹ Прервать", callback_data="shell_cancel"),
             ]
         ])
-        await message.answer(
-            f"⚠️ <b>Консоль запрашивает ввод:</b>\n<code>{prompt_text}</code>\n\n"
+        await safe_reply(
+            message,
+            f"⚠️ <b>Консоль запрашивает ввод:</b>\n<code>{html.escape(prompt_text)}</code>\n\n"
             f"<i>Нажмите кнопку ниже или отправьте нужный текст в чат:</i>",
-            parse_mode="HTML",
             reply_markup=markup
         )
 
@@ -495,18 +565,18 @@ async def cmd_exec(message: types.Message, command: CommandObject):
         
         status_str = "⏹ Прервано" if cancelled else ("✅ Завершено (код 0)" if code == 0 else f"⚠️ Код ошибки: {code}")
         
-        escaped_out = out[-3500:].replace("<", "&lt;").replace(">", "&gt;") if out else "<i>(нет вывода)</i>"
+        escaped_out = html.escape(out[-3500:]) if out else "<i>(нет вывода)</i>"
         final_text = (
-            f"💻 <b>Команда:</b> <code>{arg}</code>\n"
+            f"💻 <b>Команда:</b> <code>{html.escape(arg)}</code>\n"
             f"<b>Статус:</b> {status_str}\n\n"
             f"<pre><code>{escaped_out}</code></pre>"
         )
         try:
             await live_msg.edit_text(final_text, parse_mode="HTML")
         except Exception:
-            await message.answer(final_text, parse_mode="HTML")
+            await safe_reply(message, final_text)
 
     except Exception as e:
-        await live_msg.edit_text(f"❌ Ошибка запуска: {e}")
+        await safe_reply(message, f"❌ Ошибка запуска: {html.escape(str(e))}")
     finally:
         session.active_runner = None

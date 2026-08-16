@@ -1,4 +1,5 @@
 import os
+import html
 import asyncio
 from pathlib import Path
 from aiogram import Router, types, F
@@ -6,9 +7,20 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 
 import config
 from session_manager import session_manager
-from utils import get_system_info, get_persistent_keyboard
+from utils import (
+    get_system_info,
+    get_persistent_keyboard,
+    get_response_inline_keyboard,
+    safe_send_message,
+    markdown_to_html,
+    split_message,
+    get_chat_badge,
+    extract_media_files,
+)
 from shell_runner import ShellRunner
 from file_explorer import generate_ascii_tree, get_explorer_keyboard
+from agent_runner import AgentRunner, is_effort_supported_for_model
+from quota_manager import quota_manager
 
 router = Router()
 
@@ -42,11 +54,12 @@ def get_chats_keyboard(user_id: int) -> InlineKeyboardMarkup:
     for c in convs[:8]:
         is_active = (c.id == session.active_conv_id)
         prefix = "🟢 " if is_active else "💬 "
-        title_snippet = (c.title[:24] + "..") if len(c.title) > 24 else c.title
-        count_str = f" ({c.message_count} сообщ.)" if c.message_count > 0 else ""
+        active_tag = " (активен)" if is_active else ""
+        title_snippet = (c.title[:20] + "..") if len(c.title) > 20 else c.title
+        count_str = f" [{c.message_count}]" if c.message_count > 0 else ""
         buttons.append([
             InlineKeyboardButton(
-                text=f"{prefix}{title_snippet}{count_str}",
+                text=f"{prefix}{title_snippet}{count_str}{active_tag}",
                 callback_data=f"switch_chat:{c.id}"
             )
         ])
@@ -73,11 +86,12 @@ async def cb_main_menu(callback: types.CallbackQuery):
     active_conv = session.get_active_conv()
     conv_title = active_conv.title if active_conv else "Новый диалог"
     
+    effort_info = session.effort if is_effort_supported_for_model(session.model) else f"{session.effort} (встроенный)"
     text = (
         f"🤖 <b>Главное меню:</b>\n\n"
-        f"• Активный диалог: <b>{conv_title}</b>\n"
-        f"• Модель: <code>{session.model}</code> ({session.effort})\n"
-        f"• Рабочая папка: <code>{session.cwd}</code>\n"
+        f"• Активный диалог: <b>{html.escape(conv_title)}</b>\n"
+        f"• Модель: <code>{html.escape(session.model)}</code> ({html.escape(effort_info)})\n"
+        f"• Рабочая папка: <code>{html.escape(session.cwd)}</code>\n"
         f"• Режим: <code>{'Автопилот ⚡' if session.mode == 'auto' else 'Ручное подтверждение 🛡️'}</code>"
     )
     await callback.answer()
@@ -96,8 +110,8 @@ async def cb_chats(callback: types.CallbackQuery):
 
     text = (
         f"💬 <b>Управление диалогами (чатами):</b>\n\n"
-        f"🟢 <b>Вы сейчас в чате:</b> «{active_title}»\n"
-        f"📂 <b>Рабочая папка:</b> <code>{session.cwd}</code>\n\n"
+        f"🟢 <b>Вы сейчас в чате:</b> «{html.escape(active_title)}»\n"
+        f"📂 <b>Рабочая папка:</b> <code>{html.escape(session.cwd)}</code>\n\n"
         f"<i>Выберите другой диалог из списка ниже, чтобы переключиться на него, "
         f"или создайте новый:</i>"
     )
@@ -112,6 +126,12 @@ async def cb_chats(callback: types.CallbackQuery):
 async def cb_switch_chat(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     conv_id = callback.data.split("switch_chat:")[1]
+    session = session_manager.get_session(user_id)
+    
+    if session.active_conv_id == conv_id:
+        await callback.answer("Этот чат уже выбран как активный!")
+        return
+
     if session_manager.switch_conversation(user_id, conv_id):
         session = session_manager.get_session(user_id)
         conv = session.get_active_conv()
@@ -119,8 +139,8 @@ async def cb_switch_chat(callback: types.CallbackQuery):
         await callback.answer(f"Переключено на '{title}'!")
         await cb_chats(callback)
         await callback.message.answer(
-            f"🟢 <b>Активный чат изменен:</b> «{title}»\n"
-            f"📂 <b>Рабочая папка:</b> <code>{session.cwd}</code>",
+            f"🟢 <b>Активный чат изменен:</b> «{html.escape(title)}»\n"
+            f"📂 <b>Рабочая папка:</b> <code>{html.escape(session.cwd)}</code>",
             parse_mode="HTML",
             reply_markup=get_persistent_keyboard(title)
         )
@@ -135,8 +155,8 @@ async def cb_new(callback: types.CallbackQuery):
     session = session_manager.get_session(user_id)
     await callback.answer("Создан новый диалог!")
     await callback.message.answer(
-        f"✨ <b>Создан новый чистый диалог:</b> «{conv.title}»\n"
-        f"📂 Рабочая папка: <code>{session.cwd}</code>\n"
+        f"✨ <b>Создан новый чистый диалог:</b> «{html.escape(conv.title)}»\n"
+        f"📂 Рабочая папка: <code>{html.escape(session.cwd)}</code>\n\n"
         f"<i>Все ваши предыдущие чаты сохранены в <code>/chats</code>.</i>",
         parse_mode="HTML",
         reply_markup=get_persistent_keyboard("Новый диалог")
@@ -154,7 +174,7 @@ async def cb_delete_chat(callback: types.CallbackQuery):
         title = active_conv.title if active_conv else "Новый диалог"
         await cb_chats(callback)
         await callback.message.answer(
-            f"🗑 <b>Диалог удален.</b>\nТекущий активный чат: «{title}»",
+            f"🗑 <b>Диалог удален.</b>\nТекущий активный чат: «{html.escape(title)}»",
             parse_mode="HTML",
             reply_markup=get_persistent_keyboard(title)
         )
@@ -186,10 +206,10 @@ async def cb_tree(callback: types.CallbackQuery):
     tree_text = generate_ascii_tree(target_dir, max_depth=2, max_entries=12)
     keyboard = get_explorer_keyboard(target_dir, current_cwd=session.cwd, page=0)
     
-    escaped_tree = tree_text.replace("<", "&lt;").replace(">", "&gt;")
+    escaped_tree = html.escape(tree_text)
     text = (
         f"🌲 <b>Файловая система сервера:</b>\n"
-        f"📍 Каталог: <code>{target_dir}</code>\n\n"
+        f"📍 Каталог: <code>{html.escape(str(target_dir))}</code>\n\n"
         f"<pre><code>{escaped_tree}</code></pre>\n"
         f"<i>Нажмите на папку для перехода внутрь или сделайте ее рабочей (CWD):</i>"
     )
@@ -211,10 +231,10 @@ async def cb_tree_cd(callback: types.CallbackQuery):
     tree_text = generate_ascii_tree(target_dir, max_depth=2, max_entries=12)
     keyboard = get_explorer_keyboard(target_dir, current_cwd=session.cwd, page=0)
     
-    escaped_tree = tree_text.replace("<", "&lt;").replace(">", "&gt;")
+    escaped_tree = html.escape(tree_text)
     text = (
         f"🌲 <b>Файловая система сервера:</b>\n"
-        f"📍 Каталог: <code>{target_dir}</code>\n\n"
+        f"📍 Каталог: <code>{html.escape(str(target_dir))}</code>\n\n"
         f"<pre><code>{escaped_tree}</code></pre>\n"
         f"<i>Нажмите на папку для перехода внутрь или сделайте ее рабочей (CWD):</i>"
     )
@@ -236,10 +256,10 @@ async def cb_tree_page(callback: types.CallbackQuery):
     tree_text = generate_ascii_tree(target_dir, max_depth=2, max_entries=12)
     keyboard = get_explorer_keyboard(target_dir, current_cwd=session.cwd, page=page)
     
-    escaped_tree = tree_text.replace("<", "&lt;").replace(">", "&gt;")
+    escaped_tree = html.escape(tree_text)
     text = (
         f"🌲 <b>Файловая система сервера:</b>\n"
-        f"📍 Каталог: <code>{target_dir}</code>\n\n"
+        f"📍 Каталог: <code>{html.escape(str(target_dir))}</code>\n\n"
         f"<pre><code>{escaped_tree}</code></pre>\n"
         f"<i>Нажмите на папку для перехода внутрь или сделайте ее рабочей (CWD):</i>"
     )
@@ -266,10 +286,10 @@ async def cb_tree_set_cwd(callback: types.CallbackQuery):
         session = session_manager.get_session(user_id)
         tree_text = generate_ascii_tree(target_dir, max_depth=2, max_entries=12)
         keyboard = get_explorer_keyboard(target_dir, current_cwd=session.cwd, page=0)
-        escaped_tree = tree_text.replace("<", "&lt;").replace(">", "&gt;")
+        escaped_tree = html.escape(tree_text)
         text = (
             f"🌲 <b>Файловая система сервера:</b>\n"
-            f"📍 <b>Рабочий каталог (CWD):</b> <code>{target_dir}</code> ✅\n\n"
+            f"📍 <b>Рабочий каталог (CWD):</b> <code>{html.escape(str(target_dir))}</code> ✅\n\n"
             f"<pre><code>{escaped_tree}</code></pre>"
         )
         try:
@@ -304,8 +324,8 @@ async def cb_tree_file(callback: types.CallbackQuery):
 
     await callback.answer()
     await callback.message.answer(
-        f"📄 <b>Файл:</b> <code>{target_file.name}</code>\n"
-        f"📍 Путь: <code>{target_file}</code>\n"
+        f"📄 <b>Файл:</b> <code>{html.escape(target_file.name)}</code>\n"
+        f"📍 Путь: <code>{html.escape(str(target_file))}</code>\n"
         f"⚖️ Размер: <code>{size_str}</code>",
         parse_mode="HTML",
         reply_markup=markup
@@ -326,11 +346,11 @@ async def cb_tree_download(callback: types.CallbackQuery):
         ext = p.suffix.lower()
         input_file = FSInputFile(str(p), filename=p.name)
         if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
-            await callback.message.answer_photo(photo=input_file, caption=f"📸 <code>{p.name}</code>", parse_mode="HTML")
+            await callback.message.answer_photo(photo=input_file, caption=f"📸 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
         else:
-            await callback.message.answer_document(document=input_file, caption=f"📄 <code>{p.name}</code>", parse_mode="HTML")
+            await callback.message.answer_document(document=input_file, caption=f"📄 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
     except Exception as e:
-        await callback.message.answer(f"❌ Ошибка отправки: {e}")
+        await callback.message.answer(f"❌ Ошибка отправки: {html.escape(str(e))}", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "tree_close")
@@ -360,6 +380,14 @@ async def cb_status(callback: types.CallbackQuery):
         active_op = "Выполняется задача ИИ 🤖"
     elif session.active_task and not session.active_task.done():
         active_op = "Выполняется фоновый процесс ⚙️"
+
+    quota_info = await quota_manager.get_quota_info(user_id, session.model)
+    quota_status = "✅ В норме"
+    if quota_info:
+        rem = max(0, int(quota_info["estimated_reset_at"] - time.time()))
+        quota_status = f"⏳ Ожидание сброса (~{rem} сек.)"
+
+    effort_str = session.effort if is_effort_supported_for_model(session.model) else f"{session.effort} (встроенный)"
         
     text = (
         f"📊 <b>Статус системы и агента:</b>\n\n"
@@ -369,11 +397,12 @@ async def cb_status(callback: types.CallbackQuery):
         f"• Диск: <code>{sys_info['disk_free_gb']} GB свободно / {sys_info['disk_total_gb']} GB ({sys_info['disk_percent']}%)</code>\n"
         f"• Аптайм бота: <code>{sys_info['uptime']}</code>\n\n"
         f"<b>🤖 Сессия агента:</b>\n"
-        f"• Активный чат: <b>💬 {conv_title}</b> (всего: {len(session.conversations)})\n"
+        f"• Активный чат: <b>💬 {html.escape(conv_title)}</b> (всего: {len(session.conversations)})\n"
         f"• Активная операция: <b>{active_op}</b>\n"
-        f"• Модель: <code>{session.model}</code> ({session.effort})\n"
+        f"• Модель: <code>{html.escape(session.model)}</code> ({html.escape(effort_str)})\n"
+        f"• Статус квоты: <b>{quota_status}</b>\n"
         f"• Режим: <code>{session.mode}</code>\n"
-        f"• Рабочий каталог: <code>{session.cwd}</code>\n"
+        f"• Рабочий каталог: <code>{html.escape(session.cwd)}</code>\n"
         f"• Conversation ID: <code>{session.conversation_id or '—'}</code>"
     )
     await callback.answer()
@@ -400,8 +429,15 @@ async def cb_set_model(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     model_id = callback.data.split("set_model:")[1]
     session_manager.set_model(user_id, model_id)
-    await callback.answer(f"Модель изменена на {model_id}!")
-    await callback.message.edit_text(f"✅ <b>Модель успешно изменена на:</b> <code>{model_id}</code>", parse_mode="HTML")
+    
+    supports_eff = is_effort_supported_for_model(model_id)
+    effort_note = "" if supports_eff else "\n<i>(Модель использует встроенный уровень размышлений)</i>"
+    
+    await callback.answer(f"Модель: {model_id}")
+    await callback.message.edit_text(
+        f"✅ <b>Модель успешно изменена на:</b> <code>{html.escape(model_id)}</code>{effort_note}",
+        parse_mode="HTML"
+    )
 
 
 @router.callback_query(F.data == "btn_choose_effort")
@@ -409,6 +445,9 @@ async def cb_choose_effort(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     session = session_manager.get_session(user_id)
     
+    supports_eff = is_effort_supported_for_model(session.model)
+    note = "" if supports_eff else f"\n\n<i>⚠️ Для текущей модели <code>{html.escape(session.model)}</code> уровень размышлений зафиксирован.</i>"
+
     efforts = [
         ("low", "Low (Быстрый ответ) ⚡"),
         ("medium", "Medium (Сбалансированный) ⚖️"),
@@ -421,7 +460,7 @@ async def cb_choose_effort(callback: types.CallbackQuery):
         
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.answer()
-    await callback.message.answer(f"⚡ <b>Выберите уровень рассуждений:</b>", parse_mode="HTML", reply_markup=markup)
+    await callback.message.answer(f"⚡ <b>Выберите уровень рассуждений:</b>{note}", parse_mode="HTML", reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("set_effort:"))
@@ -471,6 +510,7 @@ async def cb_help(callback: types.CallbackQuery):
         "• <code>/tree</code> — древо файлов и интерактивная навигация по папкам.\n"
         "• <code>/exec npm run build</code> — запуск команды с кнопками подтверждения.\n"
         "• Отправьте любое фото или файл с подписью для анализа.\n"
+        "• <code>/quota</code> — проверка состояния квоты.\n"
         "• <code>/stop</code> — остановка текущей операции.",
         parse_mode="HTML"
     )
@@ -487,12 +527,15 @@ async def cb_shell_input(callback: types.CallbackQuery):
         session.active_runner.write_input(input_str)
         await callback.answer(f"Отправлено: '{input_str or 'Enter'}'")
         await callback.message.edit_text(
-            f"✅ <b>Ввод передан в консоль:</b> <code>{input_str or 'Enter'}</code>",
+            f"✅ <b>Ввод передан в консоль:</b> <code>{html.escape(input_str or 'Enter')}</code>",
             parse_mode="HTML"
         )
     else:
         await callback.answer("Процесс уже не ожидает ввода.")
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "shell_cancel")
@@ -505,4 +548,110 @@ async def cb_shell_cancel(callback: types.CallbackQuery):
         await callback.message.edit_text("🛑 <b>Процесс был прерван по вашей команде.</b>", parse_mode="HTML")
     else:
         await callback.answer("Нет активного процесса.")
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data == "confirm_act:yes")
+async def cb_confirm_yes(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    session = session_manager.get_session(user_id)
+    
+    if session.active_runner:
+        await callback.answer("Агент уже выполняет задачу!")
+        return
+
+    await callback.answer("Подтверждено: выполняю...")
+    
+    active_conv = session.get_active_conv()
+    conv_title = active_conv.title if active_conv else "Диалог"
+    
+    status_msg = await callback.message.answer(
+        f"🤖 <i>[Чат: «{html.escape(conv_title)}»] Выполняю подтвержденные действия...</i>",
+        parse_mode="HTML"
+    )
+
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(f"<i>[Чат: «{html.escape(conv_title)}»]</i>\n{text}", parse_mode="HTML")
+        except Exception:
+            pass
+
+    confirm_prompt = "Да, подтверждаю. Выполняй запланированные действия и команды."
+    runner = AgentRunner(
+        session=session,
+        prompt=confirm_prompt,
+        chat_id=callback.message.chat.id,
+        on_status=update_status
+    )
+    session.active_runner = runner
+
+    try:
+        result = await runner.run()
+        resp_text = result.get("response", "") or "ℹ️ <i>Действие завершено.</i>"
+        conv_id = result.get("conversation_id")
+        
+        session_manager.record_turn(user_id, confirm_prompt, conv_id)
+        
+        updated_conv = session.get_active_conv()
+        current_title = updated_conv.title if updated_conv else "Диалог"
+        html_resp = markdown_to_html(resp_text)
+
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        chunks = split_message(html_resp)
+        if chunks:
+            badge = get_chat_badge(current_title, session.cwd)
+            chunks[0] = badge + chunks[0]
+
+        is_review = (session.mode == "review")
+        inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            kb = inline_kb if is_last else None
+            await safe_send_message(
+                bot=callback.bot,
+                chat_id=callback.message.chat.id,
+                text=chunk,
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+
+        # Media files
+        media_files = extract_media_files(resp_text)
+        for mpath, mtype in media_files:
+            p = Path(mpath)
+            if p.exists() and p.is_file():
+                try:
+                    inp = FSInputFile(str(p), filename=p.name)
+                    if mtype == "image":
+                        await callback.message.answer_photo(photo=inp, caption=f"📸 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
+                    else:
+                        await callback.message.answer_document(document=inp, caption=f"📄 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
+                except Exception:
+                    pass
+
+    except Exception as e:
+        await safe_send_message(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            text=f"❌ <b>Ошибка выполнения:</b> <code>{html.escape(str(e))}</code>",
+            parse_mode="HTML"
+        )
+    finally:
+        session.active_runner = None
+
+
+@router.callback_query(F.data == "confirm_act:no")
+async def cb_confirm_no(callback: types.CallbackQuery):
+    await callback.answer("Действие отменено.")
+    await callback.message.answer(
+        "🛑 <b>Действие отменено.</b>\nКоманды не были выполнены. Вы можете отправить новое указание или уточнить задачу.",
+        parse_mode="HTML"
+    )

@@ -8,6 +8,7 @@ from aiogram.types import BotCommand
 
 import config
 from handlers import commands_router, callbacks_router, media_router, chat_router
+from quota_manager import quota_manager
 
 # Configure logging
 logging.basicConfig(
@@ -59,6 +60,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="plan", description="📋 Режим планирования задачи"),
         BotCommand(command="btw", description="💬 Задать попутный вопрос"),
         BotCommand(command="status", description="📊 Статус сервера и агента"),
+        BotCommand(command="quota", description="⏳ Проверить статус квоты"),
         BotCommand(command="exec", description="💻 Выполнить bash-команду"),
         BotCommand(command="cd", description="📂 Сменить рабочую папку"),
         BotCommand(command="ls", description="📁 Список файлов в папке"),
@@ -115,9 +117,17 @@ async def main():
     logger.info(f"Bot connected successfully as @{bot_info.username} (ID: {bot_info.id})")
     print(f"\n🚀 Бот @{bot_info.username} успешно запущен и готов к работе!\n")
 
+    # Start background quota monitor
+    quota_task = asyncio.create_task(quota_manager.start_monitor_loop(bot))
+
     try:
         await dp.start_polling(bot)
     finally:
+        quota_task.cancel()
+        try:
+            await quota_task
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()
 
 

@@ -3,20 +3,42 @@ import json
 import os
 import signal
 import time
+import html
+import logging
 from typing import Optional, Callable, Dict, Any, List
 import config
 from session_manager import UserSession, session_manager
+from quota_manager import quota_manager
+
+logger = logging.getLogger("AntigravityBot.AgentRunner")
+
+def is_effort_supported_for_model(model_name: Optional[str]) -> bool:
+    """
+    Determines if the given model supports the --effort CLI flag in agy.
+    Non-Gemini models (claude, gpt, deepseek, etc.) do NOT support --effort.
+    """
+    if not model_name:
+        return False
+    m_lower = model_name.lower()
+    if any(prefix in m_lower for prefix in ["claude", "gpt", "o1", "o3", "deepseek", "qwen", "llama", "mistral"]):
+        return False
+    if "gemini" in m_lower:
+        return True
+    return False
+
 
 class AgentRunner:
     def __init__(
         self,
         session: UserSession,
         prompt: str,
+        chat_id: Optional[int] = None,
         on_status: Optional[Callable[[str], Any]] = None,
         extra_flags: Optional[List[str]] = None,
     ):
         self.session = session
         self.prompt = prompt
+        self.chat_id = chat_id or session.user_id
         self.on_status = on_status
         self.extra_flags = extra_flags or []
         self.process: Optional[asyncio.subprocess.Process] = None
@@ -36,7 +58,7 @@ class AgentRunner:
                 res = self.on_status(text)
                 if asyncio.iscoroutine(res):
                     await res
-            except Exception as e:
+            except Exception:
                 pass
 
     def cancel(self):
@@ -50,21 +72,21 @@ class AgentRunner:
                 except Exception:
                     pass
 
-    async def run(self) -> Dict[str, Any]:
-        """
-        Executes agy CLI with stream-json output and returns a dict with:
-        {
-            "status": "SUCCESS" | "ERROR" | "CANCELLED",
-            "response": str,
-            "conversation_id": str,
-            "error": Optional[str],
-            "tools_used": List[str],
-        }
-        """
+    def _build_cmd(self, allow_effort: bool = True) -> List[str]:
+        prompt_text = self.prompt
+        if self.session.mode == "review" and "--mode" not in self.extra_flags:
+            prompt_text = (
+                "[РЕЖИМ С ПОДТВЕРЖДЕНИЯМИ]: "
+                "Если для решения задачи требуется запуск bash-команд на сервере или изменение файлов, "
+                "сначала обязательно опиши пользователю предлагаемые шаги/команды и спроси его согласие/подтверждение на их выполнение.\n\n"
+                f"{self.prompt}"
+            )
+
         cmd = [
             config.AGY_BIN,
-            "-p", self.prompt,
+            "-p", prompt_text,
             "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
         ]
 
         if self.session.conversation_id:
@@ -73,15 +95,52 @@ class AgentRunner:
         if self.session.model:
             cmd.extend(["--model", self.session.model])
 
-        if self.session.effort:
+        if allow_effort and self.session.effort and is_effort_supported_for_model(self.session.model):
             cmd.extend(["--effort", self.session.effort])
-
-        if self.session.mode == "auto":
-            cmd.append("--dangerously-skip-permissions")
 
         if self.extra_flags:
             cmd.extend(self.extra_flags)
 
+        return cmd
+
+    async def run(self) -> Dict[str, Any]:
+        """
+        Executes agy CLI with stream-json output and returns execution result.
+        Automatically handles non-effort models and quota exhaustion tracking.
+        """
+        result = await self._run_internal(allow_effort=True)
+        
+        # Check if error is due to unsupported effort flag, and retry once without effort
+        err_msg = result.get("error") or ""
+        if result.get("status") == "ERROR" and "--effort is not supported" in err_msg:
+            logger.info(f"Model {self.session.model} rejected --effort flag. Retrying without --effort...")
+            result = await self._run_internal(allow_effort=False)
+
+        # Check for quota exhaustion
+        if result.get("status") == "ERROR" and result.get("error"):
+            is_quota, est_sec = quota_manager.detect_quota_error(result["error"])
+            if is_quota:
+                conv = self.session.get_active_conv()
+                conv_title = conv.title if conv else "Новый диалог"
+                est_delay = await quota_manager.register_quota_exceeded(
+                    user_id=self.session.user_id,
+                    chat_id=self.chat_id,
+                    model=self.session.model,
+                    conv_title=conv_title,
+                    error_text=result["error"]
+                )
+                time_hint = f"~{int(est_delay)} сек." if est_delay < 120 else f"~{int(est_delay // 60)} мин."
+                quota_alert = (
+                    f"⏳ <b>Лимит квоты исчерпан для модели:</b> <code>{html.escape(self.session.model)}</code>\n"
+                    f"<i>(Примерное время сброса: {time_hint})</i>\n\n"
+                    f"🔔 <b>Я автоматически пришлю сообщение в этот чат, как только квота обнулится!</b>"
+                )
+                result["response"] = quota_alert
+
+        return result
+
+    async def _run_internal(self, allow_effort: bool = True) -> Dict[str, Any]:
+        cmd = self._build_cmd(allow_effort=allow_effort)
         tools_used = []
         collected_response = ""
         final_conversation_id = self.session.conversation_id or ""
@@ -147,19 +206,22 @@ class AgentRunner:
                         tool_info = step.get("tool_info", {})
                         params = tool_info.get("parameters", {})
                         
-                        tool_desc = tool_name
+                        tool_desc = html.escape(str(tool_name))
                         if tool_name == "run_command":
-                            cmd_preview = str(params.get("CommandLine", ""))[:60]
+                            cmd_preview = html.escape(str(params.get("CommandLine", ""))[:60])
                             tool_desc = f"💻 Выполняю команду: <code>{cmd_preview}</code>"
                         elif tool_name in ["view_file", "replace_file_content", "write_to_file"]:
                             path_preview = params.get("AbsolutePath") or params.get("TargetFile") or ""
-                            tool_desc = f"📝 Работа с файлом: <code>{os.path.basename(str(path_preview))}</code>"
+                            base_name = html.escape(os.path.basename(str(path_preview)))
+                            tool_desc = f"📝 Работа с файлом: <code>{base_name}</code>"
                         elif tool_name == "list_dir":
-                            tool_desc = f"📂 Читаю каталог: <code>{params.get('DirectoryPath', '.')}</code>"
+                            dir_path = html.escape(str(params.get('DirectoryPath', '.')))
+                            tool_desc = f"📂 Читаю каталог: <code>{dir_path}</code>"
                         elif tool_name == "search_web":
-                            tool_desc = f"🔍 Ищу в сети: <code>{str(params.get('query', ''))[:40]}</code>"
+                            query_str = html.escape(str(params.get('query', ''))[:40])
+                            tool_desc = f"🔍 Ищу в сети: <code>{query_str}</code>"
                         else:
-                            tool_desc = f"⚙️ Инструмент: <b>{tool_name}</b>"
+                            tool_desc = f"⚙️ Инструмент: <b>{html.escape(str(tool_name))}</b>"
 
                         if tool_name not in tools_used:
                             tools_used.append(tool_name)
@@ -197,8 +259,14 @@ class AgentRunner:
             status = "ERROR"
             error_msg = str(e)
 
-        if not collected_response and error_msg:
-            collected_response = f"❌ <b>Ошибка выполнения:</b>\n<code>{error_msg}</code>"
+        if not collected_response:
+            if error_msg:
+                collected_response = f"❌ <b>Ошибка выполнения:</b>\n<code>{html.escape(error_msg)}</code>"
+            elif tools_used:
+                tools_str = html.escape(", ".join(tools_used))
+                collected_response = f"✅ <b>Действие успешно выполнено.</b>\n<i>(Использованы инструменты: {tools_str})</i>"
+            else:
+                collected_response = "ℹ️ <i>Агент завершил работу, но не сформировал текстового ответа.</i>"
 
         return {
             "status": status,

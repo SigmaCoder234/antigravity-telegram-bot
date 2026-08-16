@@ -1,14 +1,23 @@
 import os
+import html
 from pathlib import Path
 from aiogram import Router, types, F
 from aiogram.types import FSInputFile
 
 import config
 from session_manager import session_manager
-from utils import markdown_to_html, split_message, extract_media_files, get_persistent_keyboard, get_chat_badge
+from utils import (
+    markdown_to_html,
+    split_message,
+    extract_media_files,
+    get_persistent_keyboard,
+    get_response_inline_keyboard,
+    get_chat_badge,
+    safe_reply
+)
 from agent_runner import AgentRunner
 from shell_runner import ShellRunner
-from handlers.commands import cmd_chats, cmd_new, cmd_tree, cmd_status, cmd_start
+from handlers.commands import cmd_chats, cmd_tree, cmd_status, cmd_start
 
 router = Router()
 
@@ -19,14 +28,10 @@ async def handle_text_message(message: types.Message):
     session = session_manager.get_session(user_id)
 
     # 1. Handle Quick Action buttons from persistent bottom keyboard
-    if user_text.startswith("💬 "):
+    if user_text.startswith("💬"):
         await cmd_chats(message)
         return
-    elif user_text == "✨ Новый чат":
-        await cmd_new(message)
-        return
     elif user_text == "🌲 Файлы /tree":
-        # Create a dummy command object or call tree logic
         from aiogram.filters import CommandObject
         await cmd_tree(message, CommandObject(prefix="/", command="tree", args=""))
         return
@@ -42,27 +47,27 @@ async def handle_text_message(message: types.Message):
         conv_id = session.waiting_rename_conv_id
         session.waiting_rename_conv_id = None
         if session_manager.rename_conversation(user_id, conv_id, user_text):
-            await message.answer(
-                f"✅ <b>Диалог переименован:</b> «{user_text}»",
-                parse_mode="HTML",
+            await safe_reply(
+                message,
+                f"✅ <b>Диалог переименован:</b> «{html.escape(user_text)}»",
                 reply_markup=get_persistent_keyboard(user_text)
             )
         else:
-            await message.answer("❌ Не удалось переименовать диалог.")
+            await safe_reply(message, "❌ Не удалось переименовать диалог.")
         return
 
     # 3. Check if an active shell command is waiting for user input
     if session.active_runner and isinstance(session.active_runner, ShellRunner) and session.active_runner.is_waiting():
         session.active_runner.write_input(user_text)
-        await message.answer(f"✅ <b>Ввод передан в консоль:</b> <code>{user_text}</code>", parse_mode="HTML")
+        await safe_reply(message, f"✅ <b>Ввод передан в консоль:</b> <code>{html.escape(user_text)}</code>")
         return
 
     # 4. Check if an agent task is already running
     if session.active_runner:
-        await message.answer(
+        await safe_reply(
+            message,
             "⏳ <b>Агент уже выполняет задачу.</b>\n"
-            "Подождите завершения или отправьте <code>/stop</code> для отмены.",
-            parse_mode="HTML"
+            "Подождите завершения или отправьте <code>/stop</code> для отмены."
         )
         return
 
@@ -70,23 +75,28 @@ async def handle_text_message(message: types.Message):
     active_conv = session.get_active_conv()
     initial_title = active_conv.title if active_conv else "Новый диалог"
 
-    status_msg = await message.answer(
-        f"🤖 <i>[Чат: «{initial_title}»] Думаю над ответом...</i>",
-        parse_mode="HTML"
+    status_msg = await safe_reply(
+        message,
+        f"🤖 <i>[Чат: «{html.escape(initial_title)}»] Думаю над ответом...</i>"
     )
     
     async def update_status(text: str):
         try:
-            await status_msg.edit_text(f"<i>[Чат: «{initial_title}»]</i>\n{text}", parse_mode="HTML")
+            await status_msg.edit_text(f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n{text}", parse_mode="HTML")
         except Exception:
             pass
 
-    runner = AgentRunner(session=session, prompt=user_text, on_status=update_status)
+    runner = AgentRunner(
+        session=session,
+        prompt=user_text,
+        chat_id=message.chat.id,
+        on_status=update_status
+    )
     session.active_runner = runner
 
     try:
         result = await runner.run()
-        resp_text = result.get("response", "") or "Ответ пуст."
+        resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не вернул текстового ответа.</i>"
         conv_id = result.get("conversation_id")
         
         # Record turn in conversation history
@@ -98,23 +108,19 @@ async def handle_text_message(message: types.Message):
 
         html_resp = markdown_to_html(resp_text)
 
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
         chunks = split_message(html_resp)
         if chunks:
             badge = get_chat_badge(current_title, session.cwd)
             chunks[0] = badge + chunks[0]
 
-        reply_kb = get_persistent_keyboard(current_title)
+        is_review = (session.mode == "review")
+        inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
         for i, chunk in enumerate(chunks):
-            # Attach persistent keyboard to the last chunk
+            # Attach inline confirmation keyboard to the last chunk
             is_last = (i == len(chunks) - 1)
-            kb = reply_kb if is_last else None
-            await message.answer(chunk, parse_mode="HTML", reply_markup=kb)
+            kb = inline_kb if is_last else None
+            await safe_reply(message, chunk, reply_markup=kb)
 
         # Check if the agent referenced or generated media/artifacts
         media_files = extract_media_files(resp_text)
@@ -124,13 +130,13 @@ async def handle_text_message(message: types.Message):
                 try:
                     inp = FSInputFile(str(p), filename=p.name)
                     if mtype == "image":
-                        await message.answer_photo(photo=inp, caption=f"📸 <code>{p.name}</code>", parse_mode="HTML")
+                        await message.answer_photo(photo=inp, caption=f"📸 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
                     else:
-                        await message.answer_document(document=inp, caption=f"📄 <code>{p.name}</code>", parse_mode="HTML")
+                        await message.answer_document(document=inp, caption=f"📄 <code>{html.escape(p.name)}</code>", parse_mode="HTML")
                 except Exception:
                     pass
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Ошибка:</b> <code>{e}</code>", parse_mode="HTML")
+        await safe_reply(message, f"❌ <b>Ошибка:</b> <code>{html.escape(str(e))}</code>")
     finally:
         session.active_runner = None
