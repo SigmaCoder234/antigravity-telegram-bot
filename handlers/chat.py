@@ -4,6 +4,7 @@ from pathlib import Path
 from aiogram import Router, types, F
 from aiogram.types import FSInputFile
 
+import re
 import config
 from session_manager import session_manager
 from utils import (
@@ -13,7 +14,8 @@ from utils import (
     get_persistent_keyboard,
     get_response_inline_keyboard,
     get_chat_badge,
-    safe_reply
+    safe_reply,
+    render_latex_to_image
 )
 from agent_runner import AgentRunner
 from shell_runner import ShellRunner
@@ -121,6 +123,30 @@ async def handle_text_message(message: types.Message):
             is_last = (i == len(chunks) - 1)
             kb = inline_kb if is_last else None
             await safe_reply(message, chunk, reply_markup=kb)
+
+        # Render block LaTeX formulas as images ($$...$$ or \[...\])
+        latex_block_exprs = re.findall(r'\$\$(.*?)\$\$', resp_text, flags=re.DOTALL)
+        latex_block_exprs += re.findall(r'\\\[(.*?)\\\]', resp_text, flags=re.DOTALL)
+        for latex_expr in latex_block_exprs:
+            latex_expr = latex_expr.strip()
+            if not latex_expr:
+                continue
+            img_path = render_latex_to_image(latex_expr)
+            if img_path and os.path.exists(img_path):
+                try:
+                    inp = FSInputFile(img_path, filename="formula.png")
+                    await message.answer_photo(
+                        photo=inp,
+                        caption=f"📐 <code>{html.escape(latex_expr[:80])}</code>",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.remove(img_path)
+                    except Exception:
+                        pass
 
         # Check if the agent referenced or generated media/artifacts
         media_files = extract_media_files(resp_text)

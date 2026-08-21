@@ -133,11 +133,120 @@ def balance_html_tags(text: str) -> str:
     return result
 
 
+def render_latex_to_image(latex_expr: str, output_dir: str = "/tmp") -> Optional[str]:
+    """
+    Renders a LaTeX expression to a PNG image using matplotlib.
+    Returns the file path to the generated image, or None on failure.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import uuid
+
+        fig, ax = plt.subplots(figsize=(0.1, 0.1))
+        ax.axis("off")
+        fig.patch.set_facecolor("white")
+
+        # Render LaTeX text centered
+        ax.text(
+            0.5, 0.5,
+            f"${latex_expr}$",
+            fontsize=18,
+            ha="center", va="center",
+            transform=ax.transAxes,
+            color="black"
+        )
+
+        filepath = os.path.join(output_dir, f"latex_{uuid.uuid4().hex[:10]}.png")
+        fig.savefig(filepath, dpi=200, bbox_inches="tight", pad_inches=0.15, facecolor="white")
+        plt.close(fig)
+        return filepath
+    except Exception as e:
+        logger.warning(f"Failed to render LaTeX: {e}")
+        return None
+
+
+# Unicode superscript/subscript maps for simple inline LaTeX
+_SUPERSCRIPT_MAP = str.maketrans("0123456789+-=()aehijklmnoprstuvx", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵉʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛˣ")
+_SUBSCRIPT_MAP = str.maketrans("0123456789+-=()aehijklmnoprstuvx", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ")
+
+# Common LaTeX symbols → Unicode
+_LATEX_SYMBOLS = {
+    r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ",
+    r"\epsilon": "ε", r"\zeta": "ζ", r"\eta": "η", r"\theta": "θ",
+    r"\iota": "ι", r"\kappa": "κ", r"\lambda": "λ", r"\mu": "μ",
+    r"\nu": "ν", r"\xi": "ξ", r"\pi": "π", r"\rho": "ρ",
+    r"\sigma": "σ", r"\tau": "τ", r"\phi": "φ", r"\chi": "χ",
+    r"\psi": "ψ", r"\omega": "ω",
+    r"\Alpha": "Α", r"\Beta": "Β", r"\Gamma": "Γ", r"\Delta": "Δ",
+    r"\Theta": "Θ", r"\Lambda": "Λ", r"\Pi": "Π", r"\Sigma": "Σ",
+    r"\Phi": "Φ", r"\Psi": "Ψ", r"\Omega": "Ω",
+    r"\infty": "∞", r"\pm": "±", r"\mp": "∓", r"\times": "×",
+    r"\div": "÷", r"\cdot": "·", r"\leq": "≤", r"\geq": "≥",
+    r"\neq": "≠", r"\approx": "≈", r"\equiv": "≡", r"\propto": "∝",
+    r"\sum": "∑", r"\prod": "∏", r"\int": "∫", r"\partial": "∂",
+    r"\nabla": "∇", r"\forall": "∀", r"\exists": "∃", r"\in": "∈",
+    r"\notin": "∉", r"\subset": "⊂", r"\supset": "⊃", r"\cup": "∪",
+    r"\cap": "∩", r"\emptyset": "∅", r"\to": "→", r"\rightarrow": "→",
+    r"\leftarrow": "←", r"\Rightarrow": "⇒", r"\Leftarrow": "⇐",
+    r"\iff": "⇔", r"\sqrt": "√", r"\langle": "⟨", r"\rangle": "⟩",
+    r"\hbar": "ℏ", r"\ell": "ℓ", r"\Re": "ℜ", r"\Im": "ℑ",
+}
+
+
+def latex_to_unicode(expr: str) -> str:
+    """
+    Converts simple inline LaTeX expressions to Unicode approximation.
+    For complex formulas, returns None (caller should fall back to image rendering).
+    """
+    result = expr.strip()
+
+    # Replace known symbols
+    for latex_cmd, uni_char in _LATEX_SYMBOLS.items():
+        result = result.replace(latex_cmd, uni_char)
+
+    # \frac{a}{b} → a/b
+    result = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', result)
+
+    # Simple superscript: x^{2} or x^2
+    def replace_sup(m):
+        base = m.group(1) if m.group(1) else ""
+        exp_text = m.group(2)
+        translated = exp_text.translate(_SUPERSCRIPT_MAP)
+        return base + translated
+    result = re.sub(r'(\w)?\^\{([^}]+)\}', replace_sup, result)
+    result = re.sub(r'(\w)?\^(\w)', replace_sup, result)
+
+    # Simple subscript: x_{i} or x_i
+    def replace_sub(m):
+        base = m.group(1) if m.group(1) else ""
+        sub_text = m.group(2)
+        translated = sub_text.translate(_SUBSCRIPT_MAP)
+        return base + translated
+    result = re.sub(r'(\w)?_\{([^}]+)\}', replace_sub, result)
+    result = re.sub(r'(\w)?_(\w)', replace_sub, result)
+
+    # \text{...} → just the text
+    result = re.sub(r'\\text\{([^}]+)\}', r'\1', result)
+    # \mathrm{...} → just the text
+    result = re.sub(r'\\mathrm\{([^}]+)\}', r'\1', result)
+    # \mathbf{...} → bold approximation
+    result = re.sub(r'\\mathbf\{([^}]+)\}', r'\1', result)
+
+    # Remove leftover braces
+    result = result.replace("{", "").replace("}", "")
+    # Remove leftover backslash commands we couldn't parse
+    result = re.sub(r'\\[a-zA-Z]+', '', result)
+
+    return result.strip()
+
+
 def markdown_to_html(text: str) -> str:
     """
     Converts standard Markdown text (from LLM/agy) into Telegram-compatible HTML.
     Safely escapes HTML entities while properly rendering code blocks, inline code,
-    headers, bold, italics, strikethroughs, blockquotes, and links.
+    headers, bold, italics, strikethroughs, blockquotes, links, lists, tables, and LaTeX.
     """
     if not text:
         return ""
@@ -146,7 +255,28 @@ def markdown_to_html(text: str) -> str:
     if text.count('```') % 2 != 0:
         text += '\n```'
 
-    # 1. Placeholders for code blocks (using tokens without underscores or asterisks)
+    # ── 0. Extract LaTeX blocks BEFORE anything else ──
+    # Block LaTeX: $$...$$ or \[...\]
+    latex_blocks = {}
+    def save_latex_block(match):
+        expr = match.group(1).strip()
+        key = f"XLATBLKX{len(latex_blocks)}XLATBLKX"
+        latex_blocks[key] = expr
+        return key
+    text = re.sub(r'\$\$(.*?)\$\$', save_latex_block, text, flags=re.DOTALL)
+    text = re.sub(r'\\\[(.*?)\\\]', save_latex_block, text, flags=re.DOTALL)
+
+    # Inline LaTeX: $...$ (but not $$) or \(...\)
+    latex_inlines = {}
+    def save_latex_inline(match):
+        expr = match.group(1).strip()
+        key = f"XLATINLX{len(latex_inlines)}XLATINLX"
+        latex_inlines[key] = expr
+        return key
+    text = re.sub(r'(?<!\$)\$([^\$\n]+?)\$(?!\$)', save_latex_inline, text)
+    text = re.sub(r'\\\((.+?)\\\)', save_latex_inline, text)
+
+    # ── 1. Placeholders for code blocks ──
     code_blocks = {}
     def save_code_block(match):
         lang = (match.group(1) or "").strip()
@@ -162,7 +292,7 @@ def markdown_to_html(text: str) -> str:
 
     text = re.sub(r'```([a-zA-Z0-9_\-\+]*)\n?(.*?)```', save_code_block, text, flags=re.DOTALL)
 
-    # 2. Placeholders for inline code
+    # ── 2. Placeholders for inline code ──
     inline_codes = {}
     def save_inline_code(match):
         code = match.group(1)
@@ -173,33 +303,100 @@ def markdown_to_html(text: str) -> str:
 
     text = re.sub(r'`([^`\n]+)`', save_inline_code, text)
 
-    # 3. Escape HTML in regular text
+    # ── 3. Escape HTML in regular text ──
     text = html.escape(text)
 
-    # 4. Markdown Headers: # Header -> <b>Header</b>
+    # ── 4. Markdown Headers ──
     def replace_headers(match):
         header_text = match.group(2).strip()
         return f"\n<b>{header_text}</b>\n"
     text = re.sub(r'^(#{1,6})\s+(.+)$', replace_headers, text, flags=re.MULTILINE)
 
-    # 5. Bold: **text** or __text__
+    # ── 5. Bold ──
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     text = re.sub(r'(?<!\w)__(.+?)__(?!\w)', r'<b>\1</b>', text, flags=re.DOTALL)
 
-    # 6. Italic: *text* or _text_
+    # ── 6. Italic ──
     text = re.sub(r'(?<!\w)\*([^\*\n]+?)\*(?!\w)', r'<i>\1</i>', text)
     text = re.sub(r'(?<!\w)_([^_\n]+?)_(?!\w)', r'<i>\1</i>', text)
 
-    # 7. Strikethrough: ~~text~~
+    # ── 7. Strikethrough ──
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text, flags=re.DOTALL)
 
-    # 8. Blockquotes: > text
+    # ── 8. Blockquotes ──
     def replace_blockquote(match):
         quote_text = match.group(1).strip()
         return f"<blockquote>{quote_text}</blockquote>"
     text = re.sub(r'^(?:&gt;|>)\s*(.+)$', replace_blockquote, text, flags=re.MULTILINE)
 
-    # 9. Links: [text](url) -> <a href="url">text</a>
+    # ── 9. Lists (unordered and ordered) ──
+    def replace_lists(text: str) -> str:
+        lines = text.split('\n')
+        result_lines = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Unordered list: - item or * item (but not --- horizontal rule)
+            ul_match = re.match(r'^(\s*)[-*]\s+(.+)$', line)
+            # Ordered list: 1. item
+            ol_match = re.match(r'^(\s*)\d+[.)]\s+(.+)$', line)
+
+            if ul_match:
+                content = ul_match.group(2)
+                result_lines.append(f"  • {content}")
+            elif ol_match:
+                content = ol_match.group(2)
+                # Find the ordinal number
+                num_match = re.match(r'^(\s*)(\d+)[.)]\s+', line)
+                num = num_match.group(2) if num_match else "•"
+                result_lines.append(f"  {num}. {content}")
+            else:
+                result_lines.append(line)
+            i += 1
+        return '\n'.join(result_lines)
+
+    text = replace_lists(text)
+
+    # ── 10. Tables ──
+    def replace_tables(text: str) -> str:
+        lines = text.split('\n')
+        result_lines = []
+        i = 0
+        while i < len(lines):
+            # Detect table row: | col | col |
+            if re.match(r'^\s*\|.+\|', lines[i]):
+                table_lines = []
+                while i < len(lines) and re.match(r'^\s*\|.+\|', lines[i]):
+                    table_lines.append(lines[i])
+                    i += 1
+
+                # Parse table
+                rows = []
+                for tl in table_lines:
+                    # Skip separator rows (|---|---| or |:---:|:---:|)
+                    stripped = tl.strip()
+                    cells_raw = stripped.strip('|').split('|')
+                    if all(re.match(r'^[\s\-:]+$', c) for c in cells_raw):
+                        continue
+                    cells = [c.strip() for c in tl.strip().strip('|').split('|')]
+                    rows.append(cells)
+
+                if rows:
+                    # First row is header
+                    header = rows[0]
+                    result_lines.append(f"<b>{'  │  '.join(header)}</b>")
+                    result_lines.append("─" * min(40, max(10, sum(len(c) + 5 for c in header))))
+                    for row in rows[1:]:
+                        result_lines.append(f"{'  │  '.join(row)}")
+                    result_lines.append("")  # blank line after table
+            else:
+                result_lines.append(lines[i])
+                i += 1
+        return '\n'.join(result_lines)
+
+    text = replace_tables(text)
+
+    # ── 11. Links ──
     def replace_link(match):
         label = match.group(1)
         url = match.group(2)
@@ -211,17 +408,27 @@ def markdown_to_html(text: str) -> str:
 
     text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', replace_link, text)
 
-    # 10. Horizontal rules: --- or *** -> ──────────────
+    # ── 12. Horizontal rules ──
     text = re.sub(r'^\s*([*\-_]){3,}\s*$', '──────────────', text, flags=re.MULTILINE)
 
-    # 11. Restore inline code and code blocks
+    # ── 13. Restore inline code and code blocks ──
     for key, tag in inline_codes.items():
         text = text.replace(key, tag)
-
     for key, tag in code_blocks.items():
         text = text.replace(key, tag)
 
-    # 12. Sanitize and balance tags
+    # ── 14. Restore inline LaTeX → Unicode ──
+    for key, expr in latex_inlines.items():
+        uni = latex_to_unicode(expr)
+        text = text.replace(key, f"<code>{html.escape(uni)}</code>")
+
+    # ── 15. Restore block LaTeX → Unicode (with hint) ──
+    # Block formulas: try Unicode first, mark with 📐 prefix
+    for key, expr in latex_blocks.items():
+        uni = latex_to_unicode(expr)
+        text = text.replace(key, f"\n<pre>📐 {html.escape(uni)}</pre>\n")
+
+    # ── 16. Sanitize and balance tags ──
     text = sanitize_telegram_html(text)
     text = balance_html_tags(text)
 
