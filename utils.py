@@ -1,10 +1,12 @@
 import re
 import html
+import asyncio
+import random
 import os
 import psutil
 import time
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Callable, Any
 from pathlib import Path
 from aiogram import Bot, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputRichMessage
@@ -665,6 +667,177 @@ async def send_agent_response(
     body = markdown_to_html(text) if is_markdown else text
     await _send_html_chunks(bot, chat_id, get_chat_badge(conv_title, cwd) + header_html + body, reply_markup)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Live streaming of the answer via sendRichMessageDraft (private chats only)
+# ---------------------------------------------------------------------------
+
+# draft_id -> (chat_id, callback) for the "stop generation" button
+ACTIVE_DRAFTS: Dict[int, Tuple[int, Callable[[], Any]]] = {}
+
+
+def _html_to_plain(text: str) -> str:
+    return html.unescape(re.sub(r'<[^>]+>', '', text)).strip()
+
+
+def close_open_markdown(text: str) -> str:
+    """Closes a code fence or $$ formula that is still open in a partial answer."""
+    fence_count = sum(
+        1 for line in text.split("\n") if line.strip().startswith("```") or line.strip().startswith("~~~")
+    )
+    if fence_count % 2 == 1:
+        return text + "\n```"
+    if text.count("$$") % 2 == 1:
+        return text + "$$"
+    return text
+
+
+class ResponseProgress:
+    """
+    Shows progress while Claude works.
+
+    In private chats (STREAM_RESPONSES=true) the answer is streamed as an animated
+    rich-message draft: the text appears as Claude writes it, with the current tool
+    shown underneath. Drafts are ephemeral, so the loop re-sends them as a keep-alive
+    while tools run; the final answer is sent as a normal message, which replaces the draft.
+
+    Elsewhere, or if Telegram rejects drafts, it falls back to editing a status message.
+    """
+
+    FLUSH_INTERVAL = 0.8
+    KEEPALIVE_INTERVAL = 10.0
+
+    def __init__(
+        self,
+        bot: Bot,
+        chat_id: int,
+        chat_type: Optional[str],
+        conv_title: str,
+        cwd: str,
+        header_md: str = "",
+        status_prefix_html: str = "",
+        initial_status: str = "🤖 <i>Думаю над ответом...</i>",
+    ):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.conv_title = conv_title
+        self.cwd = cwd
+        self.header_md = header_md
+        self.status_prefix_html = status_prefix_html
+        self.status_html = initial_status
+        self.text = ""
+        self.status_msg: Optional[types.Message] = None
+        self.draft_id = random.randint(1, 2**31 - 1)
+        self.use_draft = bool(config.STREAM_RESPONSES and config.RICH_MESSAGES and chat_type == "private")
+        self._dirty = True
+        self._status_after_text = True
+        self._last_sent = 0.0
+        self._task: Optional[asyncio.Task] = None
+        self._on_stop: Optional[Callable[[], Any]] = None
+
+    # -- lifecycle ---------------------------------------------------------
+    async def start(self):
+        if self.use_draft and await self._send_draft():
+            ACTIVE_DRAFTS[self.draft_id] = (self.chat_id, self._handle_stop)
+            self._task = asyncio.create_task(self._loop())
+        else:
+            self.use_draft = False
+            await self._show_status_message()
+
+    def set_stop_callback(self, callback: Callable[[], Any]):
+        self._on_stop = callback
+
+    async def finish(self, delete_status: bool = True):
+        ACTIVE_DRAFTS.pop(self.draft_id, None)
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
+        if delete_status and self.status_msg:
+            try:
+                await self.status_msg.delete()
+            except Exception:
+                pass
+            self.status_msg = None
+
+    # -- callbacks for AgentRunner -----------------------------------------
+    async def on_status(self, status_html: str):
+        self.status_html = status_html
+        self._status_after_text = True
+        if self.use_draft:
+            self._dirty = True
+        else:
+            await self._show_status_message()
+
+    async def on_partial(self, text: str):
+        self.text = text
+        self._status_after_text = False
+        if self.use_draft:
+            self._dirty = True
+
+    # -- internals ---------------------------------------------------------
+    def _handle_stop(self):
+        if self._on_stop:
+            res = self._on_stop()
+            if asyncio.iscoroutine(res):
+                asyncio.ensure_future(res)
+
+    def _render_draft(self) -> str:
+        body = self.text.strip()
+        if body:
+            # Show the tail if the answer outgrows a single rich message
+            body = split_markdown(body, max(1000, config.RICH_MAX_CHARS - 1000))[-1]
+            body = close_open_markdown(body)
+        status = _html_to_plain(self.status_html)
+        status_md = f"_{_escape_md_inline(status)}_" if status else ""
+        parts = [(get_chat_badge_md(self.conv_title, self.cwd) + self.header_md + body).rstrip()]
+        if status_md and (not body or self._status_after_text):
+            parts.append(status_md)
+        return "\n\n".join(p for p in parts if p.strip())
+
+    async def _send_draft(self) -> bool:
+        try:
+            await self.bot.send_rich_message_draft(
+                chat_id=self.chat_id,
+                draft_id=self.draft_id,
+                rich_message=InputRichMessage(markdown=self._render_draft()),
+                can_stop=True,
+            )
+            self._last_sent = time.monotonic()
+            self._dirty = False
+            return True
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            return True
+        except Exception as e:
+            logger.warning(f"Rich draft streaming disabled: {e}")
+            return False
+
+    async def _loop(self):
+        while True:
+            await asyncio.sleep(self.FLUSH_INTERVAL)
+            now = time.monotonic()
+            if self._dirty or now - self._last_sent >= self.KEEPALIVE_INTERVAL:
+                if not await self._send_draft():
+                    # Fall back to the classic status message for the rest of the run
+                    self.use_draft = False
+                    ACTIVE_DRAFTS.pop(self.draft_id, None)
+                    await self._show_status_message()
+                    return
+
+    async def _show_status_message(self):
+        text = f"{self.status_prefix_html}{self.status_html}"
+        try:
+            if self.status_msg:
+                await self.status_msg.edit_text(text, parse_mode="HTML")
+            else:
+                self.status_msg = await safe_send_message(self.bot, self.chat_id, text)
+        except Exception:
+            pass
 
 
 def extract_media_files(text: str) -> List[Tuple[str, str]]:

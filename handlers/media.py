@@ -14,6 +14,7 @@ from utils import (
     get_persistent_keyboard,
     get_response_inline_keyboard,
     send_agent_response,
+    ResponseProgress,
     get_chat_badge,
     safe_reply
 )
@@ -35,6 +36,7 @@ async def handle_photo(message: types.Message, bot: Bot):
     active_conv = session.get_active_conv()
     initial_title = active_conv.title if active_conv else "Новый диалог"
 
+    progress = None
     status_msg = await safe_reply(
         message,
         f"📥 <i>[Чат: «{html.escape(initial_title)}»] Загружаю и анализирую изображение...</i>"
@@ -51,21 +53,29 @@ async def handle_photo(message: types.Message, bot: Bot):
             f"и ответь на запрос пользователя:\n\n{caption}"
         )
         
-        async def update_status(text: str):
-            try:
-                await status_msg.edit_text(f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n{text}", parse_mode="HTML")
-            except Exception:
-                pass
+        progress = ResponseProgress(
+            bot=bot,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            conv_title=initial_title,
+            cwd=session.cwd,
+            status_prefix_html=f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n",
+        )
+        progress.status_msg = status_msg  # reused as the fallback status message
 
         runner = AgentRunner(
             session=session,
             prompt=prompt,
             chat_id=message.chat.id,
-            on_status=update_status
+            on_status=progress.on_status,
+            on_partial=progress.on_partial if progress.use_draft else None,
         )
+        progress.set_stop_callback(runner.cancel)
         session.active_runner = runner
-        
+
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не вернул текстового ответа.</i>"
         conv_id = result.get("conversation_id")
         
@@ -111,6 +121,8 @@ async def handle_photo(message: types.Message, bot: Bot):
     except Exception as e:
         await safe_reply(message, f"❌ <b>Ошибка обработки фото:</b> <code>{html.escape(str(e))}</code>")
     finally:
+        if progress:
+            await progress.finish()
         session.active_runner = None
 
 
@@ -127,6 +139,7 @@ async def handle_document(message: types.Message, bot: Bot):
     active_conv = session.get_active_conv()
     initial_title = active_conv.title if active_conv else "Новый диалог"
 
+    progress = None
     status_msg = await safe_reply(
         message,
         f"📥 <i>[Чат: «{html.escape(initial_title)}»] Загружаю документ: {html.escape(safe_name)}...</i>"
@@ -141,21 +154,29 @@ async def handle_document(message: types.Message, bot: Bot):
             f"Запрос пользователя:\n\n{caption}"
         )
         
-        async def update_status(text: str):
-            try:
-                await status_msg.edit_text(f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n{text}", parse_mode="HTML")
-            except Exception:
-                pass
+        progress = ResponseProgress(
+            bot=bot,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            conv_title=initial_title,
+            cwd=session.cwd,
+            status_prefix_html=f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n",
+        )
+        progress.status_msg = status_msg  # reused as the fallback status message
 
         runner = AgentRunner(
             session=session,
             prompt=prompt,
             chat_id=message.chat.id,
-            on_status=update_status
+            on_status=progress.on_status,
+            on_partial=progress.on_partial if progress.use_draft else None,
         )
+        progress.set_stop_callback(runner.cancel)
         session.active_runner = runner
-        
+
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не вернул текстового ответа.</i>"
         conv_id = result.get("conversation_id")
         
@@ -201,4 +222,6 @@ async def handle_document(message: types.Message, bot: Bot):
     except Exception as e:
         await safe_reply(message, f"❌ <b>Ошибка обработки файла:</b> <code>{html.escape(str(e))}</code>")
     finally:
+        if progress:
+            await progress.finish()
         session.active_runner = None

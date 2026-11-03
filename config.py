@@ -120,6 +120,9 @@ RICH_MESSAGES = os.getenv("RICH_MESSAGES", "true").strip().lower() not in ("0", 
 # Max characters per rich message before splitting (auto-reduced if Telegram rejects it)
 RICH_MAX_CHARS = int(os.getenv("RICH_MAX_CHARS", "16000") or 16000)
 
+# Stream the answer live as an animated rich-message draft (private chats only)
+STREAM_RESPONSES = os.getenv("STREAM_RESPONSES", "true").strip().lower() not in ("0", "false", "no", "off")
+
 # Sessions file
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 

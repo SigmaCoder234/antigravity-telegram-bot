@@ -17,6 +17,7 @@ from utils import (
     get_persistent_keyboard,
     get_response_inline_keyboard,
     send_agent_response,
+    ResponseProgress,
     get_chat_badge,
     safe_reply
 )
@@ -429,7 +430,16 @@ async def cmd_btw(message: types.Message, command: CommandObject):
         await safe_reply(message, "⚠️ Укажите вопрос: <code>/btw ваш попутный вопрос</code>")
         return
         
-    status_msg = await safe_reply(message, "💬 <i>Обрабатываю попутный вопрос...</i>")
+    conv = session.get_active_conv()
+    progress = ResponseProgress(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        conv_title=conv.title if conv else "Диалог",
+        cwd=session.cwd,
+        header_md="💬 **Попутный ответ:**\n\n",
+        initial_status="💬 <i>Обрабатываю попутный вопрос...</i>",
+    )
     
     btw_prompt = f"[Попутный вопрос от пользователя (By-The-Way). Ответь кратко и четко]: {arg}"
     runner = AgentRunner(
@@ -437,18 +447,18 @@ async def cmd_btw(message: types.Message, command: CommandObject):
         prompt=btw_prompt,
         chat_id=message.chat.id,
         persist_session=False,
+        on_status=progress.on_status,
+        on_partial=progress.on_partial if progress.use_draft else None,
     )
+    progress.set_stop_callback(runner.cancel)
     session.active_runner = runner
     
     try:
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не сформировал ответа.</i>"
 
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        conv = session.get_active_conv()
         await send_agent_response(
             bot=message.bot,
             chat_id=message.chat.id,
@@ -462,6 +472,7 @@ async def cmd_btw(message: types.Message, command: CommandObject):
     except Exception as e:
         await safe_reply(message, f"❌ Ошибка: {html.escape(str(e))}")
     finally:
+        await progress.finish()
         session.active_runner = None
 
 
@@ -474,34 +485,35 @@ async def cmd_plan(message: types.Message, command: CommandObject):
         await safe_reply(message, "⚠️ Укажите задачу для планирования: <code>/plan описание задачи</code>")
         return
         
-    status_msg = await safe_reply(message, "📋 <i>Составляю план выполнения...</i>")
-    
-    async def update_status(text: str):
-        try:
-            await status_msg.edit_text(text, parse_mode="HTML")
-        except Exception:
-            pass
+    conv = session.get_active_conv()
+    progress = ResponseProgress(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        chat_type=message.chat.type,
+        conv_title=conv.title if conv else "Диалог",
+        cwd=session.cwd,
+        header_md="📋 **План выполнения:**\n\n",
+        initial_status="📋 <i>Составляю план выполнения...</i>",
+    )
 
     plan_prompt = f"[Составь детальный и практический план реализации следующей задачи]: {arg}"
     runner = AgentRunner(
         session=session,
         prompt=plan_prompt,
         chat_id=message.chat.id,
-        on_status=update_status,
+        on_status=progress.on_status,
+        on_partial=progress.on_partial if progress.use_draft else None,
         permission_mode="plan",
     )
+    progress.set_stop_callback(runner.cancel)
     session.active_runner = runner
     
     try:
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "План не сформирован."
 
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        conv = session.get_active_conv()
         await send_agent_response(
             bot=message.bot,
             chat_id=message.chat.id,
@@ -515,6 +527,7 @@ async def cmd_plan(message: types.Message, command: CommandObject):
     except Exception as e:
         await safe_reply(message, f"❌ Ошибка планирования: {html.escape(str(e))}")
     finally:
+        await progress.finish()
         session.active_runner = None
 
 

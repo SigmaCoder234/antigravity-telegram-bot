@@ -12,6 +12,7 @@ from utils import (
     get_persistent_keyboard,
     get_response_inline_keyboard,
     send_agent_response,
+    ResponseProgress,
     safe_send_message,
     markdown_to_html,
     split_message,
@@ -565,28 +566,31 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
     active_conv = session.get_active_conv()
     conv_title = active_conv.title if active_conv else "Диалог"
     
-    status_msg = await callback.message.answer(
-        f"🤖 <i>[Чат: «{html.escape(conv_title)}»] Выполняю подтвержденные действия...</i>",
-        parse_mode="HTML"
+    progress = ResponseProgress(
+        bot=callback.bot,
+        chat_id=callback.message.chat.id,
+        chat_type=callback.message.chat.type,
+        conv_title=conv_title,
+        cwd=session.cwd,
+        status_prefix_html=f"<i>[Чат: «{html.escape(conv_title)}»]</i>\n",
+        initial_status="🤖 <i>Выполняю подтвержденные действия...</i>",
     )
-
-    async def update_status(text: str):
-        try:
-            await status_msg.edit_text(f"<i>[Чат: «{html.escape(conv_title)}»]</i>\n{text}", parse_mode="HTML")
-        except Exception:
-            pass
 
     confirm_prompt = "Да, подтверждаю. Выполняй запланированные действия и команды."
     runner = AgentRunner(
         session=session,
         prompt=confirm_prompt,
         chat_id=callback.message.chat.id,
-        on_status=update_status
+        on_status=progress.on_status,
+        on_partial=progress.on_partial if progress.use_draft else None,
     )
+    progress.set_stop_callback(runner.cancel)
     session.active_runner = runner
 
     try:
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Действие завершено.</i>"
         conv_id = result.get("conversation_id")
         
@@ -594,11 +598,6 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
         
         updated_conv = session.get_active_conv()
         current_title = updated_conv.title if updated_conv else "Диалог"
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
         is_review = (session.mode == "review")
         inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
@@ -634,6 +633,7 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
             parse_mode="HTML"
         )
     finally:
+        await progress.finish()
         session.active_runner = None
 
 

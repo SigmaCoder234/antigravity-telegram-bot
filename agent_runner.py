@@ -126,6 +126,7 @@ class AgentRunner:
         extra_flags: Optional[List[str]] = None,
         permission_mode: Optional[str] = None,
         persist_session: bool = True,
+        on_partial: Optional[Callable[[str], Any]] = None,
     ):
         self.session = session
         self.prompt = prompt
@@ -134,6 +135,8 @@ class AgentRunner:
         self.extra_flags = extra_flags or []
         self.permission_mode = permission_mode
         self.persist_session = persist_session
+        # Receives the text of the assistant message being generated (for live drafts)
+        self.on_partial = on_partial
         self.process: Optional[asyncio.subprocess.Process] = None
         self._cancelled = False
         self.last_status_time = 0.0
@@ -144,7 +147,8 @@ class AgentRunner:
             return
         now = time.time()
         # Throttle updates to avoid Telegram rate limits (at most once every 1.5s unless forced)
-        if force or (now - self.last_status_time >= 1.5):
+        # When streaming drafts, ResponseProgress batches updates itself, so never drop one here
+        if force or self.on_partial or (now - self.last_status_time >= 1.5):
             self.last_status_time = now
             self.current_status_text = text
             try:
@@ -153,6 +157,14 @@ class AgentRunner:
                     await res
             except Exception:
                 pass
+
+    async def _notify_partial(self, text: str):
+        try:
+            res = self.on_partial(text)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
 
     def cancel(self):
         self._cancelled = True
@@ -207,6 +219,9 @@ class AgentRunner:
 
         if config.MAX_BUDGET_USD:
             cmd.extend(["--max-budget-usd", config.MAX_BUDGET_USD])
+
+        if self.on_partial:
+            cmd.append("--include-partial-messages")
 
         cmd.extend(config.CLAUDE_EXTRA_ARGS)
         cmd.extend(self.extra_flags)
@@ -268,6 +283,7 @@ class AgentRunner:
         collected_response = ""
         last_assistant_text = ""
         plan_text = ""
+        stream_text = ""
         plan_file_path: Optional[str] = None
         exit_plan_called = False
         run_started_at = time.time()
@@ -330,6 +346,19 @@ class AgentRunner:
                         await self._notify_status("🔁 <i>API временно недоступно, повторяю запрос...</i>")
                     elif subtype == "compact_boundary":
                         await self._notify_status("🗜️ <i>Сжимаю контекст диалога...</i>")
+
+                elif etype == "stream_event":
+                    # Token-level deltas (only with --include-partial-messages)
+                    if self.on_partial and not data.get("parent_tool_use_id"):
+                        ev = data.get("event") or {}
+                        ev_type = ev.get("type")
+                        if ev_type == "message_start":
+                            stream_text = ""
+                        elif ev_type == "content_block_delta":
+                            delta = ev.get("delta") or {}
+                            if delta.get("type") == "text_delta" and delta.get("text"):
+                                stream_text += delta["text"]
+                                await self._notify_partial(stream_text)
 
                 elif etype == "assistant":
                     message = data.get("message") or {}
