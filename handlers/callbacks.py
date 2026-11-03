@@ -403,7 +403,7 @@ async def cb_status(callback: types.CallbackQuery):
         f"• Статус квоты: <b>{quota_status}</b>\n"
         f"• Режим: <code>{session.mode}</code>\n"
         f"• Рабочий каталог: <code>{html.escape(session.cwd)}</code>\n"
-        f"• Conversation ID: <code>{session.conversation_id or '—'}</code>"
+        f"• Claude Session ID: <code>{(session.get_active_conv().claude_session_id if session.get_active_conv() else None) or '—'}</code>"
     )
     await callback.answer()
     await callback.message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
@@ -448,11 +448,7 @@ async def cb_choose_effort(callback: types.CallbackQuery):
     supports_eff = is_effort_supported_for_model(session.model)
     note = "" if supports_eff else f"\n\n<i>⚠️ Для текущей модели <code>{html.escape(session.model)}</code> уровень размышлений зафиксирован.</i>"
 
-    efforts = [
-        ("low", "Low (Быстрый ответ) ⚡"),
-        ("medium", "Medium (Сбалансированный) ⚖️"),
-        ("high", "High (Глубокое размышление) 🧠"),
-    ]
+    efforts = config.AVAILABLE_EFFORTS
     buttons = []
     for eid, elabel in efforts:
         prefix = "✅ " if session.effort == eid else ""

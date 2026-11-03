@@ -16,6 +16,7 @@ class ChatConversation:
     updated_at: float
     cwd: str
     message_count: int = 0
+    claude_session_id: Optional[str] = None  # Claude Code session to --resume
 
     def to_dict(self) -> dict:
         return {
@@ -25,6 +26,7 @@ class ChatConversation:
             "updated_at": self.updated_at,
             "cwd": self.cwd,
             "message_count": self.message_count,
+            "claude_session_id": self.claude_session_id,
         }
 
     @classmethod
@@ -36,6 +38,7 @@ class ChatConversation:
             updated_at=data.get("updated_at", time.time()),
             cwd=data.get("cwd", config.DEFAULT_CWD),
             message_count=data.get("message_count", 0),
+            claude_session_id=data.get("claude_session_id"),
         )
 
 

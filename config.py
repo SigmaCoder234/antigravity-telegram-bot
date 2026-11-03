@@ -1,5 +1,6 @@
 import os
 import shutil
+import shlex
 import json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -34,27 +35,57 @@ if ADMIN_ID:
     ALLOWED_USERS.add(ADMIN_ID)
 
 # Defaults
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-3.7-flash-high")
-DEFAULT_EFFORT = os.getenv("DEFAULT_EFFORT", "high")  # low | medium | high
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "opus")
+DEFAULT_EFFORT = os.getenv("DEFAULT_EFFORT", "high")  # low | medium | high | xhigh | max
 DEFAULT_CWD = os.getenv("DEFAULT_CWD", str(Path.home()))
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "auto")  # auto | review
 
-# Discover agy binary
-_custom_agy = os.getenv("AGY_BIN_PATH", "")
-if _custom_agy and os.path.exists(_custom_agy):
-    AGY_BIN = _custom_agy
-else:
-    AGY_BIN = shutil.which("agy") or "/root/.local/bin/agy"
+# Optional model to fall back to when the primary one is overloaded (e.g. "sonnet")
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "").strip()
 
-# Available Models for selector
+# Optional per-turn spending cap in USD (only applies to API-key billing), e.g. "2.5"
+MAX_BUDGET_USD = os.getenv("MAX_BUDGET_USD", "").strip()
+
+# Extra raw CLI arguments appended to every claude call (space-separated, shell-quoted)
+CLAUDE_EXTRA_ARGS = shlex.split(os.getenv("CLAUDE_EXTRA_ARGS", ""))
+
+# Discover the Claude Code binary
+_custom_claude = os.getenv("CLAUDE_BIN_PATH", "").strip()
+if _custom_claude and os.path.exists(_custom_claude):
+    CLAUDE_BIN = _custom_claude
+else:
+    CLAUDE_BIN = (
+        shutil.which("claude")
+        or next(
+            (p for p in (
+                str(Path.home() / ".local" / "bin" / "claude"),
+                str(Path.home() / ".claude" / "local" / "claude"),
+                "/usr/local/bin/claude",
+                "/usr/bin/claude",
+            ) if os.path.exists(p)),
+            "claude",
+        )
+    )
+
+# Available Models for selector (aliases always point to the latest version)
 AVAILABLE_MODELS = [
-    ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High) ⚡"),
-    ("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
-    ("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
-    ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High) 🧠"),
-    ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking) 🎯"),
-    ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking) 👑"),
-    ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
+    ("opus", "Claude Opus (latest) 👑"),
+    ("sonnet", "Claude Sonnet (latest) 🎯"),
+    ("haiku", "Claude Haiku (latest) ⚡"),
+    ("fable", "Claude Fable (latest) 🧠"),
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5"),
+    ("claude-fable-5-1", "Claude Fable 5.1"),
+]
+
+# Reasoning effort levels supported by Claude Code (--effort)
+AVAILABLE_EFFORTS = [
+    ("low", "Low (Быстрый ответ) ⚡"),
+    ("medium", "Medium (Сбалансированный) ⚖️"),
+    ("high", "High (Глубокое размышление) 🧠"),
+    ("xhigh", "XHigh (Очень глубокое) 🔬"),
+    ("max", "Max (Максимум) 🚀"),
 ]
 
 # Sessions file

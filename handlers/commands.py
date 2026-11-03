@@ -93,7 +93,7 @@ async def cmd_start(message: types.Message):
     effort_info = session.effort if is_effort_supported_for_model(session.model) else "авто"
     text = (
         f"👋 <b>Привет, {html.escape(message.from_user.full_name)}!</b>\n\n"
-        f"Я твой персональный Telegram-мост к ИИ-агенту <b>Antigravity</b>.\n"
+        f"Я твой персональный Telegram-мост к ИИ-агенту <b>Claude Code</b>.\n"
         f"Ты можешь отправлять мне задачи, файлы, фотографии и команды для выполнения на сервере.\n\n"
         f"📌 <b>Текущее окружение:</b>\n"
         f"• Активный чат: <b>💬 {html.escape(conv_title)}</b>\n"
@@ -177,8 +177,8 @@ async def cmd_help(message: types.Message):
         "• <code>/quota</code> — Статус квоты и проверка доступности\n"
         "• <code>/stop</code> — Прервать выполнение активной операции\n\n"
         "<b>🔹 Настройки агента:</b>\n"
-        "• <code>/model</code> — Выбор языковой модели (Gemini 3.7 Flash, Claude Sonnet 4.6 и др.)\n"
-        "• <code>/effort</code> — Глубина размышлений (Low, Medium, High)\n"
+        "• <code>/model</code> — Выбор языковой модели (Claude Opus, Sonnet, Haiku, Fable)\n"
+        "• <code>/effort</code> — Глубина размышлений (Low … Max)\n"
         "• <code>/mode</code> — Автопилот / Ручное подтверждение"
     )
     await safe_reply(message, text)
@@ -234,7 +234,7 @@ async def cmd_status(message: types.Message):
         f"• Статус квоты: <b>{quota_status}</b>\n"
         f"• Режим: <code>{session.mode}</code>\n"
         f"• Рабочий каталог: <code>{html.escape(session.cwd)}</code>\n"
-        f"• Conversation ID: <code>{session.conversation_id or '—'}</code>"
+        f"• Claude Session ID: <code>{(active_conv.claude_session_id if active_conv else None) or '—'}</code>"
     )
     await safe_reply(message, text, reply_markup=get_main_keyboard())
 
@@ -288,11 +288,7 @@ async def cmd_effort(message: types.Message):
     supports_eff = is_effort_supported_for_model(session.model)
     note = "" if supports_eff else f"\n\n<i>⚠️ Для текущей модели <code>{html.escape(session.model)}</code> уровень размышлений зафиксирован.</i>"
     
-    efforts = [
-        ("low", "Low (Быстрый ответ) ⚡"),
-        ("medium", "Medium (Сбалансированный) ⚖️"),
-        ("high", "High (Глубокое размышление) 🧠"),
-    ]
+    efforts = config.AVAILABLE_EFFORTS
     buttons = []
     for eid, elabel in efforts:
         prefix = "✅ " if session.effort == eid else ""
@@ -438,7 +434,8 @@ async def cmd_btw(message: types.Message, command: CommandObject):
     runner = AgentRunner(
         session=session,
         prompt=btw_prompt,
-        chat_id=message.chat.id
+        chat_id=message.chat.id,
+        persist_session=False,
     )
     session.active_runner = runner
     
@@ -483,7 +480,7 @@ async def cmd_plan(message: types.Message, command: CommandObject):
         prompt=plan_prompt,
         chat_id=message.chat.id,
         on_status=update_status,
-        extra_flags=["--mode", "plan"]
+        permission_mode="plan",
     )
     session.active_runner = runner
     

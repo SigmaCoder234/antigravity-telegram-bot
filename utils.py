@@ -10,7 +10,7 @@ from aiogram import Bot, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
-logger = logging.getLogger("AntigravityBot.Utils")
+logger = logging.getLogger("ClaudeBot.Utils")
 
 # Record bot start time
 BOT_START_TIME = time.time()
@@ -244,7 +244,7 @@ def latex_to_unicode(expr: str) -> str:
 
 def markdown_to_html(text: str) -> str:
     """
-    Converts standard Markdown text (from LLM/agy) into Telegram-compatible HTML.
+    Converts standard Markdown text (from Claude Code) into Telegram-compatible HTML.
     Safely escapes HTML entities while properly rendering code blocks, inline code,
     headers, bold, italics, strikethroughs, blockquotes, links, lists, tables, and LaTeX.
     """

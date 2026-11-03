@@ -19,7 +19,7 @@ logging.basicConfig(
         logging.FileHandler(config.DATA_DIR / "bot.log", encoding="utf-8"),
     ]
 )
-logger = logging.getLogger("AntigravityBot")
+logger = logging.getLogger("ClaudeBot")
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -60,7 +60,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="plan", description="📋 Режим планирования задачи"),
         BotCommand(command="btw", description="💬 Задать попутный вопрос"),
         BotCommand(command="status", description="📊 Статус сервера и агента"),
-        BotCommand(command="quota", description="⏳ Проверить статус квоты"),
+        BotCommand(command="quota", description="⏳ Проверить лимиты использования"),
         BotCommand(command="exec", description="💻 Выполнить bash-команду"),
         BotCommand(command="cd", description="📂 Сменить рабочую папку"),
         BotCommand(command="ls", description="📁 Список файлов в папке"),
@@ -89,8 +89,8 @@ async def main():
         print("=" * 60 + "\n")
         return
 
-    logger.info("Starting Antigravity Telegram Bot...")
-    logger.info(f"Using agy binary: {config.AGY_BIN}")
+    logger.info("Starting Claude Code Telegram Bot...")
+    logger.info(f"Using claude binary: {config.CLAUDE_BIN}")
     logger.info(f"Default model: {config.DEFAULT_MODEL}, effort: {config.DEFAULT_EFFORT}")
 
     bot = Bot(token=config.BOT_TOKEN)
