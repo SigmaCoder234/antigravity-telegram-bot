@@ -1,6 +1,7 @@
 import os
 import shutil
 import shlex
+from typing import Optional
 import json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -78,6 +79,31 @@ AVAILABLE_MODELS = [
     ("claude-haiku-5-5", "Claude Haiku 5.5"),
     ("claude-fable-5-1", "Claude Fable 5.1"),
 ]
+
+_CLAUDE_MODEL_ALIASES = {"opus", "sonnet", "haiku", "fable", "default", "best", "opusplan"}
+
+
+def _is_claude_model(model: Optional[str]) -> bool:
+    if not model or not isinstance(model, str):
+        return False
+    m = model.strip().lower()
+    base = m.split("[", 1)[0]
+    return base in _CLAUDE_MODEL_ALIASES or "claude" in m or "anthropic" in m
+
+
+def normalize_model(model: Optional[str]) -> str:
+    """
+    Keeps valid Claude selections (aliases, claude-* ids, provider ids such as
+    us.anthropic.* or "opus[1m]") and replaces legacy agy/Gemini/GPT ids saved
+    in sessions.json with DEFAULT_MODEL.
+    """
+    if _is_claude_model(model):
+        return model.strip()
+    return DEFAULT_MODEL
+
+
+# An old .env may still carry an agy/Gemini default model
+DEFAULT_MODEL = DEFAULT_MODEL if _is_claude_model(DEFAULT_MODEL) else "opus"
 
 # Reasoning effort levels supported by Claude Code (--effort)
 AVAILABLE_EFFORTS = [

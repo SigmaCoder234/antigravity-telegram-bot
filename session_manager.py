@@ -114,7 +114,7 @@ class UserSession:
             active_conv_id=active_id,
             conversations=convs,
             cwd=cwd,
-            model=data.get("model", config.DEFAULT_MODEL),
+            model=config.normalize_model(data.get("model")),
             effort=data.get("effort", config.DEFAULT_EFFORT),
             mode=data.get("mode", config.DEFAULT_MODE),
         )

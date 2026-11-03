@@ -71,6 +71,39 @@ def describe_tool(tool_name: str, params: Dict[str, Any]) -> str:
     return f"⚙️ Инструмент: <b>{esc(name)}</b>"
 
 
+def _is_plan_file(path: str) -> bool:
+    return bool(path) and "/.claude/plans/" in path.replace("\\", "/") and path.endswith(".md")
+
+
+def _read_plan_file(path: Optional[str], since: float) -> str:
+    """
+    Reads the plan Claude Code wrote to disk. Uses the explicit path when known,
+    otherwise the newest ~/.claude/plans/*.md modified during this run.
+    """
+    candidates: List[str] = []
+    if path:
+        candidates.append(path)
+    plans_dir = os.path.join(os.path.expanduser("~"), ".claude", "plans")
+    try:
+        recent = [
+            os.path.join(plans_dir, f) for f in os.listdir(plans_dir)
+            if f.endswith(".md") and os.path.getmtime(os.path.join(plans_dir, f)) >= since - 1
+        ]
+        recent.sort(key=os.path.getmtime, reverse=True)
+        candidates.extend(recent)
+    except OSError:
+        pass
+    for candidate in candidates:
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+            if text:
+                return text
+        except OSError:
+            continue
+    return ""
+
+
 class AgentRunner:
     """
     Runs a single Claude Code (`claude -p`) turn in stream-json mode.
@@ -231,6 +264,9 @@ class AgentRunner:
         collected_response = ""
         last_assistant_text = ""
         plan_text = ""
+        plan_file_path: Optional[str] = None
+        exit_plan_called = False
+        run_started_at = time.time()
         session_id = resume_id or ""
         error_msg: Optional[str] = None
         status = "SUCCESS"
@@ -304,8 +340,16 @@ class AgentRunner:
                         elif btype == "tool_use":
                             tool_name = block.get("name") or "tool"
                             params = block.get("input") or {}
-                            if tool_name == "ExitPlanMode" and params.get("plan"):
-                                plan_text = str(params.get("plan"))
+                            if tool_name == "ExitPlanMode":
+                                exit_plan_called = True
+                                if params.get("plan"):
+                                    plan_text = str(params.get("plan"))
+                                if params.get("planFilePath"):
+                                    plan_file_path = str(params.get("planFilePath"))
+                            elif tool_name in ("Write", "Edit", "MultiEdit") and _is_plan_file(
+                                str(params.get("file_path") or "")
+                            ):
+                                plan_file_path = str(params.get("file_path"))
                             if tool_name not in tools_used:
                                 tools_used.append(tool_name)
                             await self._notify_status(describe_tool(tool_name, params))
@@ -378,6 +422,11 @@ class AgentRunner:
 
         if cost_usd is not None:
             logger.info(f"Claude turn finished: status={status}, cost=${cost_usd:.4f}, tools={tools_used}")
+
+        if not plan_text and (exit_plan_called or plan_file_path) and status != "CANCELLED":
+            # Newer Claude Code versions keep the plan in a file and send ExitPlanMode
+            # with an empty input — read the plan from disk.
+            plan_text = _read_plan_file(plan_file_path, run_started_at)
 
         if plan_text and status != "CANCELLED":
             # In plan mode the plan is delivered via the ExitPlanMode tool, and the run
