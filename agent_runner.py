@@ -457,14 +457,23 @@ class AgentRunner:
         if cost_usd is not None:
             logger.info(f"Claude turn finished: status={status}, cost=${cost_usd:.4f}, tools={tools_used}")
 
-        if not plan_text and (exit_plan_called or plan_file_path) and status != "CANCELLED":
+        is_plan_turn = self.permission_mode == "plan"
+        if not is_plan_turn:
+            plan_text = ""  # plans written during ordinary turns never replace the answer
+        elif not plan_text and (exit_plan_called or plan_file_path) and status != "CANCELLED":
             # Newer Claude Code versions keep the plan in a file and send ExitPlanMode
             # with an empty input — read the plan from disk.
             plan_text = _read_plan_file(plan_file_path, run_started_at)
 
-        if plan_text and status != "CANCELLED":
-            # In plan mode the plan is delivered via the ExitPlanMode tool, and the run
-            # may end with a "permission denied" style result — the plan is still valid.
+        # In plan mode a run may end with an error-style result after ExitPlanMode
+        # (the CLI cannot ask for plan approval). That is expected; real failures such
+        # as usage limits or a run that never reached ExitPlanMode are kept as errors.
+        plan_mode_exit = (
+            is_plan_turn
+            and exit_plan_called
+            and not quota_manager.detect_quota_error(error_msg or "")[0]
+        )
+        if plan_text and status != "CANCELLED" and (status != "ERROR" or plan_mode_exit):
             collected_response = plan_text
             status, error_msg = "SUCCESS", None
         elif status == "ERROR":

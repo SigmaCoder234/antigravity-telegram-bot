@@ -591,16 +591,68 @@ def split_markdown(text: str, max_length: int) -> List[str]:
         if buf.strip():
             chunks.append(buf.strip("\n"))
         # A single oversized block is hard-split on line boundaries
-        while len(block) > max_length:
-            cut = block.rfind("\n", 0, max_length)
-            if cut <= 0:
-                cut = max_length
-            chunks.append(block[:cut])
-            block = block[cut:].lstrip("\n")
-        buf = block
+        pieces = _split_oversized_block(block, max_length)
+        chunks.extend(pieces[:-1])
+        buf = pieces[-1]
     if buf.strip():
         chunks.append(buf.strip("\n"))
     return chunks or [text[:max_length]]
+
+
+def _split_oversized_block(block: str, max_length: int) -> List[str]:
+    """
+    Hard-splits one block that is longer than `max_length`, keeping each piece valid
+    Markdown on its own: a code fence is closed and reopened with the same opening
+    line, a $$ formula is closed and reopened, and a table repeats its header rows.
+    """
+    block = block.strip("\n")
+    lines = block.split("\n")
+    first = lines[0].strip() if lines else ""
+    prefix_lines: List[str] = []
+    suffix = ""
+    if first.startswith("```") or first.startswith("~~~"):
+        fence = "```" if first.startswith("```") else "~~~"
+        prefix_lines, suffix = [lines[0]], fence
+        body = lines[1:]
+        if body and body[-1].strip().startswith(fence):
+            body = body[:-1]
+    elif first.startswith("$$"):
+        prefix_lines, suffix = ["$$"], "$$"
+        inner = block.strip()[2:]
+        if inner.endswith("$$"):
+            inner = inner[:-2]
+        body = inner.strip("\n").split("\n")
+    elif first.startswith("|") and len(lines) >= 2 and set(lines[1].replace("|", "").strip()) <= set("-: "):
+        prefix_lines = lines[:2]
+        body = lines[2:]
+    else:
+        body = lines
+
+    overhead = sum(len(l) + 1 for l in prefix_lines) + (len(suffix) + 1 if suffix else 0)
+    budget = max(200, max_length - overhead)
+    pieces: List[str] = []
+    current: List[str] = []
+    size = 0
+    for line in body:
+        while len(line) > budget:  # a single giant line
+            if current:
+                pieces.append(current)
+                current, size = [], 0
+            pieces.append([line[:budget]])
+            line = line[budget:]
+        if size + len(line) + 1 > budget and current:
+            pieces.append(current)
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        pieces.append(current)
+
+    result = []
+    for piece in pieces:
+        parts = prefix_lines + piece + ([suffix] if suffix else [])
+        result.append("\n".join(parts))
+    return result or [block[:max_length]]
 
 
 async def _send_html_chunks(bot: Bot, chat_id: int, html_text: str, reply_markup=None):
