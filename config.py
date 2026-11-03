@@ -114,6 +114,12 @@ AVAILABLE_EFFORTS = [
     ("max", "Max (Максимум) 🚀"),
 ]
 
+# Send Claude's answers as native Telegram rich messages (Bot API 10.1+):
+# headings, tables, lists, code blocks and formulas rendered by Telegram itself.
+RICH_MESSAGES = os.getenv("RICH_MESSAGES", "true").strip().lower() not in ("0", "false", "no", "off")
+# Max characters per rich message before splitting (auto-reduced if Telegram rejects it)
+RICH_MAX_CHARS = int(os.getenv("RICH_MAX_CHARS", "16000") or 16000)
+
 # Sessions file
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 

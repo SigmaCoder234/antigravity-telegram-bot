@@ -16,6 +16,7 @@ from utils import (
     get_system_info,
     get_persistent_keyboard,
     get_response_inline_keyboard,
+    send_agent_response,
     get_chat_badge,
     safe_reply
 )
@@ -442,15 +443,22 @@ async def cmd_btw(message: types.Message, command: CommandObject):
     try:
         result = await runner.run()
         resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не сформировал ответа.</i>"
-        html_resp = markdown_to_html(resp_text)
-        
+
         try:
             await status_msg.delete()
         except Exception:
             pass
-        chunks = split_message(html_resp)
-        for chunk in chunks:
-            await safe_reply(message, f"💬 <b>Попутный ответ:</b>\n\n{chunk}")
+        conv = session.get_active_conv()
+        await send_agent_response(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            text=resp_text,
+            conv_title=conv.title if conv else "Диалог",
+            cwd=session.cwd,
+            is_markdown=result.get("is_markdown", True),
+            header_md="💬 **Попутный ответ:**\n\n",
+            header_html="💬 <b>Попутный ответ:</b>\n\n",
+        )
     except Exception as e:
         await safe_reply(message, f"❌ Ошибка: {html.escape(str(e))}")
     finally:
@@ -487,16 +495,23 @@ async def cmd_plan(message: types.Message, command: CommandObject):
     try:
         result = await runner.run()
         resp_text = result.get("response", "") or "План не сформирован."
-        html_resp = markdown_to_html(resp_text)
-        
+
         try:
             await status_msg.delete()
         except Exception:
             pass
-            
-        chunks = split_message(html_resp)
-        for chunk in chunks:
-            await safe_reply(message, chunk)
+
+        conv = session.get_active_conv()
+        await send_agent_response(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            text=resp_text,
+            conv_title=conv.title if conv else "Диалог",
+            cwd=session.cwd,
+            is_markdown=result.get("is_markdown", True),
+            header_md="📋 **План выполнения:**\n\n",
+            header_html="📋 <b>План выполнения:</b>\n\n",
+        )
     except Exception as e:
         await safe_reply(message, f"❌ Ошибка планирования: {html.escape(str(e))}")
     finally:

@@ -11,6 +11,7 @@ from utils import (
     get_system_info,
     get_persistent_keyboard,
     get_response_inline_keyboard,
+    send_agent_response,
     safe_send_message,
     markdown_to_html,
     split_message,
@@ -593,31 +594,23 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
         
         updated_conv = session.get_active_conv()
         current_title = updated_conv.title if updated_conv else "Диалог"
-        html_resp = markdown_to_html(resp_text)
-
         try:
             await status_msg.delete()
         except Exception:
             pass
 
-        chunks = split_message(html_resp)
-        if chunks:
-            badge = get_chat_badge(current_title, session.cwd)
-            chunks[0] = badge + chunks[0]
-
         is_review = (session.mode == "review")
         inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
-        for i, chunk in enumerate(chunks):
-            is_last = (i == len(chunks) - 1)
-            kb = inline_kb if is_last else None
-            await safe_send_message(
-                bot=callback.bot,
-                chat_id=callback.message.chat.id,
-                text=chunk,
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
+        await send_agent_response(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            text=resp_text,
+            conv_title=current_title,
+            cwd=session.cwd,
+            reply_markup=inline_kb,
+            is_markdown=result.get("is_markdown", True),
+        )
 
         # Media files
         media_files = extract_media_files(resp_text)

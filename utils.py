@@ -7,8 +7,10 @@ import logging
 from typing import List, Tuple, Optional
 from pathlib import Path
 from aiogram import Bot, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputRichMessage
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError, TelegramRetryAfter
+
+import config
 
 logger = logging.getLogger("ClaudeBot.Utils")
 
@@ -534,6 +536,135 @@ async def safe_reply(
             parse_mode=parse_mode,
             reply_markup=reply_markup
         )
+
+
+# ---------------------------------------------------------------------------
+# Rich messages (Bot API 10.1+): native headings, tables, lists, code, formulas
+# ---------------------------------------------------------------------------
+
+def _escape_md_inline(text: str) -> str:
+    return re.sub(r'([\\`*_\[\]<>|#])', r'\\\1', text)
+
+
+def get_chat_badge_md(conv_title: str, cwd: str) -> str:
+    """Markdown version of the chat badge, used as the rich message header."""
+    clean_title = conv_title.strip() or "Диалог"
+    short_cwd = cwd if len(cwd) <= 25 else "..." + cwd[-22:]
+    return f"💬 **[{_escape_md_inline(clean_title)}]** `{short_cwd.replace('`', '')}`\n\n---\n\n"
+
+
+def split_markdown(text: str, max_length: int) -> List[str]:
+    """
+    Splits Markdown into chunks of at most `max_length` characters on blank lines,
+    never inside a fenced code block, $$ formula block or table.
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    lines = text.split("\n")
+    blocks: List[str] = []
+    current: List[str] = []
+    in_fence = False
+    in_math = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+        elif not in_fence and stripped.count("$$") % 2 == 1:
+            in_math = not in_math
+        current.append(line)
+        if not in_fence and not in_math and stripped == "":
+            blocks.append("\n".join(current))
+            current = []
+    if current:
+        blocks.append("\n".join(current))
+
+    chunks: List[str] = []
+    buf = ""
+    for block in blocks:
+        candidate = f"{buf}\n{block}" if buf else block
+        if len(candidate) <= max_length:
+            buf = candidate
+            continue
+        if buf.strip():
+            chunks.append(buf.strip("\n"))
+        # A single oversized block is hard-split on line boundaries
+        while len(block) > max_length:
+            cut = block.rfind("\n", 0, max_length)
+            if cut <= 0:
+                cut = max_length
+            chunks.append(block[:cut])
+            block = block[cut:].lstrip("\n")
+        buf = block
+    if buf.strip():
+        chunks.append(buf.strip("\n"))
+    return chunks or [text[:max_length]]
+
+
+async def _send_html_chunks(bot: Bot, chat_id: int, html_text: str, reply_markup=None):
+    chunks = split_message(html_text)
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        await safe_send_message(bot, chat_id, chunk, reply_markup=reply_markup if is_last else None)
+
+
+async def send_agent_response(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    conv_title: str,
+    cwd: str,
+    reply_markup=None,
+    is_markdown: bool = True,
+    header_md: str = "",
+    header_html: str = "",
+) -> bool:
+    """
+    Sends Claude's answer. Markdown answers go out as native Telegram rich messages
+    (headings, tables, lists, code blocks, formulas). If rich messages are disabled
+    or Telegram rejects one, the rest falls back to the HTML renderer.
+
+    Returns True when the whole answer was delivered as rich messages.
+    """
+    if is_markdown and config.RICH_MESSAGES:
+        md_text = get_chat_badge_md(conv_title, cwd) + header_md + text
+        max_len = config.RICH_MAX_CHARS
+        chunks = split_markdown(md_text, max_len)
+        idx = 0
+        while idx < len(chunks):
+            chunk = chunks[idx]
+            is_last = (idx == len(chunks) - 1)
+            try:
+                await bot.send_rich_message(
+                    chat_id=chat_id,
+                    rich_message=InputRichMessage(markdown=chunk),
+                    reply_markup=reply_markup if is_last else None,
+                )
+                idx += 1
+            except TelegramRetryAfter:
+                raise
+            except TelegramAPIError as e:
+                err = str(e).lower()
+                if ("too long" in err or "too_long" in err or "too big" in err) and len(chunk) > 1000:
+                    # Unknown server-side limit: halve the size and re-split the remaining text
+                    max_len = max(1000, min(max_len, len(chunk)) // 2)
+                    rest = "\n\n".join(chunks[idx:])
+                    chunks = chunks[:idx] + split_markdown(rest, max_len)
+                    continue
+                logger.warning(f"Rich message rejected ({e}). Falling back to HTML.")
+                rest = "\n\n".join(chunks[idx:])
+                if idx == 0:
+                    rest = header_md + text
+                    html_text = get_chat_badge(conv_title, cwd) + header_html + markdown_to_html(rest)
+                else:
+                    html_text = markdown_to_html(rest)
+                await _send_html_chunks(bot, chat_id, html_text, reply_markup)
+                return False
+        return True
+
+    body = markdown_to_html(text) if is_markdown else text
+    await _send_html_chunks(bot, chat_id, get_chat_badge(conv_title, cwd) + header_html + body, reply_markup)
+    return False
 
 
 def extract_media_files(text: str) -> List[Tuple[str, str]]:

@@ -24,9 +24,12 @@ REVIEW_MODE_PROMPT = (
 )
 
 TELEGRAM_PROMPT = (
-    "Ты отвечаешь пользователю через Telegram-бота. Пиши ответы на языке пользователя, "
-    "используй обычный Markdown (заголовки, списки, блоки кода), избегай очень длинных таблиц. "
-    "Если создаёшь файлы, которые пользователь должен получить, сообщи их абсолютные пути."
+    "Ты отвечаешь пользователю через Telegram-бота. Ответ показывается как rich-сообщение Telegram, "
+    "которое нативно отображает Markdown: заголовки (#, ##), **жирный**, *курсив*, списки, "
+    "таблицы, блоки кода с языком, цитаты (>), разделители (---) и формулы ($...$, $$...$$). "
+    "Оформляй развёрнутые ответы структурно: заголовки разделов, списки, таблицы для сравнений. "
+    "Пиши на языке пользователя. Если создаёшь файлы, которые пользователь должен получить, "
+    "сообщи их абсолютные пути."
 )
 
 
@@ -250,6 +253,7 @@ class AgentRunner:
                     error_text=result["error"],
                 )
                 time_hint = f"~{int(est_delay)} сек." if est_delay < 120 else f"~{int(est_delay // 60)} мин."
+                result["is_markdown"] = False
                 result["response"] = (
                     f"⏳ <b>Лимит использования исчерпан для модели:</b> <code>{html.escape(self.session.model)}</code>\n"
                     f"<i>(Примерное время сброса: {time_hint})</i>\n\n"
@@ -389,6 +393,7 @@ class AgentRunner:
                     "error": "Cancelled",
                     "tools_used": tools_used,
                     "cost_usd": cost_usd,
+                    "is_markdown": False,
                 }
 
             await self.process.wait()
@@ -438,6 +443,9 @@ class AgentRunner:
         elif not collected_response:
             collected_response = last_assistant_text
 
+        # Claude's own text is Markdown; the bot's fallback messages below are HTML
+        is_markdown = bool(collected_response)
+
         if not collected_response:
             if error_msg:
                 collected_response = f"❌ <b>Ошибка выполнения:</b>\n<code>{html.escape(error_msg[:3000])}</code>"
@@ -455,4 +463,5 @@ class AgentRunner:
             "error": error_msg,
             "tools_used": tools_used,
             "cost_usd": cost_usd,
+            "is_markdown": is_markdown,
         }

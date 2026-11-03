@@ -15,7 +15,8 @@ from utils import (
     get_response_inline_keyboard,
     get_chat_badge,
     safe_reply,
-    render_latex_to_image
+    render_latex_to_image,
+    send_agent_response,
 )
 from agent_runner import AgentRunner
 from shell_runner import ShellRunner
@@ -108,25 +109,23 @@ async def handle_text_message(message: types.Message):
         updated_conv = session.get_active_conv()
         current_title = updated_conv.title if updated_conv else "Диалог"
 
-        html_resp = markdown_to_html(resp_text)
-
-        chunks = split_message(html_resp)
-        if chunks:
-            badge = get_chat_badge(current_title, session.cwd)
-            chunks[0] = badge + chunks[0]
-
         is_review = (session.mode == "review")
         inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
-        for i, chunk in enumerate(chunks):
-            # Attach inline confirmation keyboard to the last chunk
-            is_last = (i == len(chunks) - 1)
-            kb = inline_kb if is_last else None
-            await safe_reply(message, chunk, reply_markup=kb)
+        sent_rich = await send_agent_response(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            text=resp_text,
+            conv_title=current_title,
+            cwd=session.cwd,
+            reply_markup=inline_kb,
+            is_markdown=result.get("is_markdown", True),
+        )
 
-        # Render block LaTeX formulas as images ($$...$$ or \[...\])
-        latex_block_exprs = re.findall(r'\$\$(.*?)\$\$', resp_text, flags=re.DOTALL)
-        latex_block_exprs += re.findall(r'\\\[(.*?)\\\]', resp_text, flags=re.DOTALL)
+        # Rich messages render formulas natively; otherwise send block LaTeX as images
+        latex_block_exprs = [] if sent_rich else re.findall(r'\$\$(.*?)\$\$', resp_text, flags=re.DOTALL)
+        if not sent_rich:
+            latex_block_exprs += re.findall(r'\\\[(.*?)\\\]', resp_text, flags=re.DOTALL)
         for latex_expr in latex_block_exprs:
             latex_expr = latex_expr.strip()
             if not latex_expr:
