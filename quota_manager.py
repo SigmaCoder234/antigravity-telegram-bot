@@ -9,7 +9,7 @@ from aiogram import Bot
 
 import config
 
-logger = logging.getLogger("AntigravityBot.QuotaManager")
+logger = logging.getLogger("ClaudeBot.QuotaManager")
 
 class QuotaManager:
     """
@@ -45,6 +45,10 @@ class QuotaManager:
             "free quota exhausted",
             "capacity exceeded",
             "exhausted",
+            "usage limit",
+            "hit your limit",
+            "limit reached",
+            "overloaded",
         ]
 
         is_quota = any(kw in err_lower for kw in quota_keywords)
@@ -65,6 +69,24 @@ class QuotaManager:
                 seconds_estimate = val * 3600
             else:
                 seconds_estimate = val
+        elif re.search(r'\|(\d{10})\b', error_text):
+            epoch = int(re.search(r'\|(\d{10})\b', error_text).group(1))
+            diff = epoch - time.time()
+            if diff > 0:
+                seconds_estimate = diff
+        elif re.search(r'resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)', err_lower):
+            m_ampm = re.search(r'resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)', err_lower)
+            try:
+                import datetime
+                hour = int(m_ampm.group(1)) % 12 + (12 if m_ampm.group(3) == "pm" else 0)
+                minute = int(m_ampm.group(2) or 0)
+                now_dt = datetime.datetime.now()
+                target_dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target_dt < now_dt:
+                    target_dt += datetime.timedelta(days=1)
+                seconds_estimate = (target_dt - now_dt).total_seconds()
+            except Exception:
+                pass
         else:
             # Pattern: "reset at 14:30"
             m_time = re.search(r'resets?\s*(?:at|after)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?', err_lower)
@@ -138,15 +160,16 @@ class QuotaManager:
 
     async def probe_model_quota(self, model: str) -> Tuple[bool, Optional[str]]:
         """
-        Executes a minimal test query using agy to test if the quota is restored.
+        Executes a minimal test query using Claude Code to test if the quota is restored.
         Returns (is_restored, error_msg).
         """
         cmd = [
-            config.AGY_BIN,
-            "-p", "ping",
+            config.CLAUDE_BIN,
+            "-p", "Reply with the single word: pong",
             "--model", model,
             "--output-format", "json",
-            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--tools", "",
         ]
         try:
             process = await asyncio.create_subprocess_exec(
@@ -155,7 +178,7 @@ class QuotaManager:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=config.DEFAULT_CWD,
             )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=20.0)
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=60.0)
             out_str = stdout_bytes.decode("utf-8", errors="replace").strip()
             err_str = stderr_bytes.decode("utf-8", errors="replace").strip()
 
@@ -168,7 +191,7 @@ class QuotaManager:
             if out_str:
                 try:
                     data = json.loads(out_str)
-                    err = data.get("error", "")
+                    err = data.get("error", "") or (data.get("result", "") if data.get("is_error") else "")
                     if err:
                         is_q, _ = self.detect_quota_error(err)
                         if is_q:
@@ -215,7 +238,7 @@ class QuotaManager:
 
                         # Send notification to user in Telegram
                         notify_text = (
-                            f"🔔 <b>Квота обнулилась!</b>\n\n"
+                            f"🔔 <b>Лимит обнулился!</b>\n\n"
                             f"Лимит запросов для модели <code>{model}</code> успешно сброшен. "
                             f"Модель снова готова к работе!\n\n"
                             f"💬 Вы можете продолжить диалог в чате <b>«{conv_title}»</b>."

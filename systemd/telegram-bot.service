@@ -1,5 +1,5 @@
 [Unit]
-Description=Antigravity Telegram Bot Assistant
+Description=Claude Code Telegram Bot Assistant
 After=network.target
 
 [Service]

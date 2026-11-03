@@ -1,16 +1,20 @@
 import re
 import html
+import asyncio
+import random
 import os
 import psutil
 import time
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Callable, Any
 from pathlib import Path
 from aiogram import Bot, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputRichMessage
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError, TelegramRetryAfter
 
-logger = logging.getLogger("AntigravityBot.Utils")
+import config
+
+logger = logging.getLogger("ClaudeBot.Utils")
 
 # Record bot start time
 BOT_START_TIME = time.time()
@@ -244,7 +248,7 @@ def latex_to_unicode(expr: str) -> str:
 
 def markdown_to_html(text: str) -> str:
     """
-    Converts standard Markdown text (from LLM/agy) into Telegram-compatible HTML.
+    Converts standard Markdown text (from Claude Code) into Telegram-compatible HTML.
     Safely escapes HTML entities while properly rendering code blocks, inline code,
     headers, bold, italics, strikethroughs, blockquotes, links, lists, tables, and LaTeX.
     """
@@ -534,6 +538,358 @@ async def safe_reply(
             parse_mode=parse_mode,
             reply_markup=reply_markup
         )
+
+
+# ---------------------------------------------------------------------------
+# Rich messages (Bot API 10.1+): native headings, tables, lists, code, formulas
+# ---------------------------------------------------------------------------
+
+def _escape_md_inline(text: str) -> str:
+    return re.sub(r'([\\`*_\[\]<>|#])', r'\\\1', text)
+
+
+def get_chat_badge_md(conv_title: str, cwd: str) -> str:
+    """Markdown version of the chat badge, used as the rich message header."""
+    clean_title = conv_title.strip() or "Диалог"
+    short_cwd = cwd if len(cwd) <= 25 else "..." + cwd[-22:]
+    return f"💬 **[{_escape_md_inline(clean_title)}]** `{short_cwd.replace('`', '')}`\n\n---\n\n"
+
+
+def split_markdown(text: str, max_length: int) -> List[str]:
+    """
+    Splits Markdown into chunks of at most `max_length` characters on blank lines,
+    never inside a fenced code block, $$ formula block or table.
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    lines = text.split("\n")
+    blocks: List[str] = []
+    current: List[str] = []
+    in_fence = False
+    in_math = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+        elif not in_fence and stripped.count("$$") % 2 == 1:
+            in_math = not in_math
+        current.append(line)
+        if not in_fence and not in_math and stripped == "":
+            blocks.append("\n".join(current))
+            current = []
+    if current:
+        blocks.append("\n".join(current))
+
+    chunks: List[str] = []
+    buf = ""
+    for block in blocks:
+        candidate = f"{buf}\n{block}" if buf else block
+        if len(candidate) <= max_length:
+            buf = candidate
+            continue
+        if buf.strip():
+            chunks.append(buf.strip("\n"))
+        # A single oversized block is hard-split on line boundaries
+        pieces = _split_oversized_block(block, max_length)
+        chunks.extend(pieces[:-1])
+        buf = pieces[-1]
+    if buf.strip():
+        chunks.append(buf.strip("\n"))
+    return chunks or [text[:max_length]]
+
+
+def _split_oversized_block(block: str, max_length: int) -> List[str]:
+    """
+    Hard-splits one block that is longer than `max_length`, keeping each piece valid
+    Markdown on its own: a code fence is closed and reopened with the same opening
+    line, a $$ formula is closed and reopened, and a table repeats its header rows.
+    """
+    block = block.strip("\n")
+    lines = block.split("\n")
+    first = lines[0].strip() if lines else ""
+    prefix_lines: List[str] = []
+    suffix = ""
+    if first.startswith("```") or first.startswith("~~~"):
+        fence = "```" if first.startswith("```") else "~~~"
+        prefix_lines, suffix = [lines[0]], fence
+        body = lines[1:]
+        if body and body[-1].strip().startswith(fence):
+            body = body[:-1]
+    elif first.startswith("$$"):
+        prefix_lines, suffix = ["$$"], "$$"
+        inner = block.strip()[2:]
+        if inner.endswith("$$"):
+            inner = inner[:-2]
+        body = inner.strip("\n").split("\n")
+    elif first.startswith("|") and len(lines) >= 2 and set(lines[1].replace("|", "").strip()) <= set("-: "):
+        prefix_lines = lines[:2]
+        body = lines[2:]
+    else:
+        body = lines
+
+    overhead = sum(len(l) + 1 for l in prefix_lines) + (len(suffix) + 1 if suffix else 0)
+    budget = max(200, max_length - overhead)
+    pieces: List[str] = []
+    current: List[str] = []
+    size = 0
+    for line in body:
+        while len(line) > budget:  # a single giant line
+            if current:
+                pieces.append(current)
+                current, size = [], 0
+            pieces.append([line[:budget]])
+            line = line[budget:]
+        if size + len(line) + 1 > budget and current:
+            pieces.append(current)
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        pieces.append(current)
+
+    result = []
+    for piece in pieces:
+        parts = prefix_lines + piece + ([suffix] if suffix else [])
+        result.append("\n".join(parts))
+    return result or [block[:max_length]]
+
+
+async def _send_html_chunks(bot: Bot, chat_id: int, html_text: str, reply_markup=None):
+    chunks = split_message(html_text)
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        await safe_send_message(bot, chat_id, chunk, reply_markup=reply_markup if is_last else None)
+
+
+async def send_agent_response(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    conv_title: str,
+    cwd: str,
+    reply_markup=None,
+    is_markdown: bool = True,
+    header_md: str = "",
+    header_html: str = "",
+) -> bool:
+    """
+    Sends Claude's answer. Markdown answers go out as native Telegram rich messages
+    (headings, tables, lists, code blocks, formulas). If rich messages are disabled
+    or Telegram rejects one, the rest falls back to the HTML renderer.
+
+    Returns True when the whole answer was delivered as rich messages.
+    """
+    if is_markdown and config.RICH_MESSAGES:
+        md_text = get_chat_badge_md(conv_title, cwd) + header_md + text
+        max_len = config.RICH_MAX_CHARS
+        chunks = split_markdown(md_text, max_len)
+        idx = 0
+        while idx < len(chunks):
+            chunk = chunks[idx]
+            is_last = (idx == len(chunks) - 1)
+            try:
+                await bot.send_rich_message(
+                    chat_id=chat_id,
+                    rich_message=InputRichMessage(markdown=chunk),
+                    reply_markup=reply_markup if is_last else None,
+                )
+                idx += 1
+            except TelegramRetryAfter:
+                raise
+            except TelegramAPIError as e:
+                err = str(e).lower()
+                if ("too long" in err or "too_long" in err or "too big" in err) and len(chunk) > 1000:
+                    # Unknown server-side limit: halve the size and re-split the remaining text
+                    max_len = max(1000, min(max_len, len(chunk)) // 2)
+                    rest = "\n\n".join(chunks[idx:])
+                    chunks = chunks[:idx] + split_markdown(rest, max_len)
+                    continue
+                logger.warning(f"Rich message rejected ({e}). Falling back to HTML.")
+                rest = "\n\n".join(chunks[idx:])
+                if idx == 0:
+                    rest = header_md + text
+                    html_text = get_chat_badge(conv_title, cwd) + header_html + markdown_to_html(rest)
+                else:
+                    html_text = markdown_to_html(rest)
+                await _send_html_chunks(bot, chat_id, html_text, reply_markup)
+                return False
+        return True
+
+    body = markdown_to_html(text) if is_markdown else text
+    await _send_html_chunks(bot, chat_id, get_chat_badge(conv_title, cwd) + header_html + body, reply_markup)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Live streaming of the answer via sendRichMessageDraft (private chats only)
+# ---------------------------------------------------------------------------
+
+# draft_id -> (chat_id, callback) for the "stop generation" button
+ACTIVE_DRAFTS: Dict[int, Tuple[int, Callable[[], Any]]] = {}
+
+
+def _html_to_plain(text: str) -> str:
+    return html.unescape(re.sub(r'<[^>]+>', '', text)).strip()
+
+
+def close_open_markdown(text: str) -> str:
+    """Closes a code fence or $$ formula that is still open in a partial answer."""
+    fence_count = sum(
+        1 for line in text.split("\n") if line.strip().startswith("```") or line.strip().startswith("~~~")
+    )
+    if fence_count % 2 == 1:
+        return text + "\n```"
+    if text.count("$$") % 2 == 1:
+        return text + "$$"
+    return text
+
+
+class ResponseProgress:
+    """
+    Shows progress while Claude works.
+
+    In private chats (STREAM_RESPONSES=true) the answer is streamed as an animated
+    rich-message draft: the text appears as Claude writes it, with the current tool
+    shown underneath. Drafts are ephemeral, so the loop re-sends them as a keep-alive
+    while tools run; the final answer is sent as a normal message, which replaces the draft.
+
+    Elsewhere, or if Telegram rejects drafts, it falls back to editing a status message.
+    """
+
+    FLUSH_INTERVAL = 0.8
+    KEEPALIVE_INTERVAL = 10.0
+
+    def __init__(
+        self,
+        bot: Bot,
+        chat_id: int,
+        chat_type: Optional[str],
+        conv_title: str,
+        cwd: str,
+        header_md: str = "",
+        status_prefix_html: str = "",
+        initial_status: str = "🤖 <i>Думаю над ответом...</i>",
+    ):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.conv_title = conv_title
+        self.cwd = cwd
+        self.header_md = header_md
+        self.status_prefix_html = status_prefix_html
+        self.status_html = initial_status
+        self.text = ""
+        self.status_msg: Optional[types.Message] = None
+        self.draft_id = random.randint(1, 2**31 - 1)
+        self.use_draft = bool(config.STREAM_RESPONSES and config.RICH_MESSAGES and chat_type == "private")
+        self._dirty = True
+        self._status_after_text = True
+        self._last_sent = 0.0
+        self._task: Optional[asyncio.Task] = None
+        self._on_stop: Optional[Callable[[], Any]] = None
+
+    # -- lifecycle ---------------------------------------------------------
+    async def start(self):
+        if self.use_draft and await self._send_draft():
+            ACTIVE_DRAFTS[self.draft_id] = (self.chat_id, self._handle_stop)
+            self._task = asyncio.create_task(self._loop())
+        else:
+            self.use_draft = False
+            await self._show_status_message()
+
+    def set_stop_callback(self, callback: Callable[[], Any]):
+        self._on_stop = callback
+
+    async def finish(self, delete_status: bool = True):
+        ACTIVE_DRAFTS.pop(self.draft_id, None)
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
+        if delete_status and self.status_msg:
+            try:
+                await self.status_msg.delete()
+            except Exception:
+                pass
+            self.status_msg = None
+
+    # -- callbacks for AgentRunner -----------------------------------------
+    async def on_status(self, status_html: str):
+        self.status_html = status_html
+        self._status_after_text = True
+        if self.use_draft:
+            self._dirty = True
+        else:
+            await self._show_status_message()
+
+    async def on_partial(self, text: str):
+        self.text = text
+        self._status_after_text = False
+        if self.use_draft:
+            self._dirty = True
+
+    # -- internals ---------------------------------------------------------
+    def _handle_stop(self):
+        if self._on_stop:
+            res = self._on_stop()
+            if asyncio.iscoroutine(res):
+                asyncio.ensure_future(res)
+
+    def _render_draft(self) -> str:
+        body = self.text.strip()
+        if body:
+            # Show the tail if the answer outgrows a single rich message
+            body = split_markdown(body, max(1000, config.RICH_MAX_CHARS - 1000))[-1]
+            body = close_open_markdown(body)
+        status = _html_to_plain(self.status_html)
+        status_md = f"_{_escape_md_inline(status)}_" if status else ""
+        parts = [(get_chat_badge_md(self.conv_title, self.cwd) + self.header_md + body).rstrip()]
+        if status_md and (not body or self._status_after_text):
+            parts.append(status_md)
+        return "\n\n".join(p for p in parts if p.strip())
+
+    async def _send_draft(self) -> bool:
+        try:
+            await self.bot.send_rich_message_draft(
+                chat_id=self.chat_id,
+                draft_id=self.draft_id,
+                rich_message=InputRichMessage(markdown=self._render_draft()),
+                can_stop=True,
+            )
+            self._last_sent = time.monotonic()
+            self._dirty = False
+            return True
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            return True
+        except Exception as e:
+            logger.warning(f"Rich draft streaming disabled: {e}")
+            return False
+
+    async def _loop(self):
+        while True:
+            await asyncio.sleep(self.FLUSH_INTERVAL)
+            now = time.monotonic()
+            if self._dirty or now - self._last_sent >= self.KEEPALIVE_INTERVAL:
+                if not await self._send_draft():
+                    # Fall back to the classic status message for the rest of the run
+                    self.use_draft = False
+                    ACTIVE_DRAFTS.pop(self.draft_id, None)
+                    await self._show_status_message()
+                    return
+
+    async def _show_status_message(self):
+        text = f"{self.status_prefix_html}{self.status_html}"
+        try:
+            if self.status_msg:
+                await self.status_msg.edit_text(text, parse_mode="HTML")
+            else:
+                self.status_msg = await safe_send_message(self.bot, self.chat_id, text)
+        except Exception:
+            pass
 
 
 def extract_media_files(text: str) -> List[Tuple[str, str]]:

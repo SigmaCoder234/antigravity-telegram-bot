@@ -13,6 +13,8 @@ from utils import (
     extract_media_files,
     get_persistent_keyboard,
     get_response_inline_keyboard,
+    send_agent_response,
+    ResponseProgress,
     get_chat_badge,
     safe_reply
 )
@@ -34,6 +36,7 @@ async def handle_photo(message: types.Message, bot: Bot):
     active_conv = session.get_active_conv()
     initial_title = active_conv.title if active_conv else "Новый диалог"
 
+    progress = None
     status_msg = await safe_reply(
         message,
         f"📥 <i>[Чат: «{html.escape(initial_title)}»] Загружаю и анализирую изображение...</i>"
@@ -46,25 +49,33 @@ async def handle_photo(message: types.Message, bot: Bot):
         caption = message.caption or "Проанализируй это изображение, опиши что на нем и выполни необходимые действия."
         prompt = (
             f"[Пользователь отправил изображение, сохраненное на сервере: {file_path}]\n"
-            f"Пожалуйста, изучи этот файл (при необходимости используй инструмент view_file) "
+            f"Пожалуйста, изучи этот файл (открой его инструментом Read — он умеет просматривать изображения) "
             f"и ответь на запрос пользователя:\n\n{caption}"
         )
         
-        async def update_status(text: str):
-            try:
-                await status_msg.edit_text(f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n{text}", parse_mode="HTML")
-            except Exception:
-                pass
+        progress = ResponseProgress(
+            bot=bot,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            conv_title=initial_title,
+            cwd=session.cwd,
+            status_prefix_html=f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n",
+        )
+        progress.status_msg = status_msg  # reused as the fallback status message
 
         runner = AgentRunner(
             session=session,
             prompt=prompt,
             chat_id=message.chat.id,
-            on_status=update_status
+            on_status=progress.on_status,
+            on_partial=progress.on_partial if progress.use_draft else None,
         )
+        progress.set_stop_callback(runner.cancel)
         session.active_runner = runner
-        
+
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не вернул текстового ответа.</i>"
         conv_id = result.get("conversation_id")
         
@@ -73,25 +84,23 @@ async def handle_photo(message: types.Message, bot: Bot):
         updated_conv = session.get_active_conv()
         current_title = updated_conv.title if updated_conv else "Диалог"
 
-        html_resp = markdown_to_html(resp_text)
-        
         try:
             await status_msg.delete()
         except Exception:
             pass
-            
-        chunks = split_message(html_resp)
-        if chunks:
-            badge = get_chat_badge(current_title, session.cwd)
-            chunks[0] = badge + chunks[0]
 
         is_review = (session.mode == "review")
         inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
-        for i, chunk in enumerate(chunks):
-            is_last = (i == len(chunks) - 1)
-            kb = inline_kb if is_last else None
-            await safe_reply(message, chunk, reply_markup=kb)
+        await send_agent_response(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            text=resp_text,
+            conv_title=current_title,
+            cwd=session.cwd,
+            reply_markup=inline_kb,
+            is_markdown=result.get("is_markdown", True),
+        )
 
         # Check for generated / referenced output media files
         media_files = extract_media_files(resp_text)
@@ -112,6 +121,8 @@ async def handle_photo(message: types.Message, bot: Bot):
     except Exception as e:
         await safe_reply(message, f"❌ <b>Ошибка обработки фото:</b> <code>{html.escape(str(e))}</code>")
     finally:
+        if progress:
+            await progress.finish()
         session.active_runner = None
 
 
@@ -128,6 +139,7 @@ async def handle_document(message: types.Message, bot: Bot):
     active_conv = session.get_active_conv()
     initial_title = active_conv.title if active_conv else "Новый диалог"
 
+    progress = None
     status_msg = await safe_reply(
         message,
         f"📥 <i>[Чат: «{html.escape(initial_title)}»] Загружаю документ: {html.escape(safe_name)}...</i>"
@@ -142,21 +154,29 @@ async def handle_document(message: types.Message, bot: Bot):
             f"Запрос пользователя:\n\n{caption}"
         )
         
-        async def update_status(text: str):
-            try:
-                await status_msg.edit_text(f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n{text}", parse_mode="HTML")
-            except Exception:
-                pass
+        progress = ResponseProgress(
+            bot=bot,
+            chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            conv_title=initial_title,
+            cwd=session.cwd,
+            status_prefix_html=f"<i>[Чат: «{html.escape(initial_title)}»]</i>\n",
+        )
+        progress.status_msg = status_msg  # reused as the fallback status message
 
         runner = AgentRunner(
             session=session,
             prompt=prompt,
             chat_id=message.chat.id,
-            on_status=update_status
+            on_status=progress.on_status,
+            on_partial=progress.on_partial if progress.use_draft else None,
         )
+        progress.set_stop_callback(runner.cancel)
         session.active_runner = runner
-        
+
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Агент завершил работу, но не вернул текстового ответа.</i>"
         conv_id = result.get("conversation_id")
         
@@ -165,25 +185,23 @@ async def handle_document(message: types.Message, bot: Bot):
         updated_conv = session.get_active_conv()
         current_title = updated_conv.title if updated_conv else "Диалог"
 
-        html_resp = markdown_to_html(resp_text)
-        
         try:
             await status_msg.delete()
         except Exception:
             pass
-            
-        chunks = split_message(html_resp)
-        if chunks:
-            badge = get_chat_badge(current_title, session.cwd)
-            chunks[0] = badge + chunks[0]
 
         is_review = (session.mode == "review")
         inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
-        for i, chunk in enumerate(chunks):
-            is_last = (i == len(chunks) - 1)
-            kb = inline_kb if is_last else None
-            await safe_reply(message, chunk, reply_markup=kb)
+        await send_agent_response(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            text=resp_text,
+            conv_title=current_title,
+            cwd=session.cwd,
+            reply_markup=inline_kb,
+            is_markdown=result.get("is_markdown", True),
+        )
 
         # Check for generated / referenced output media files
         media_files = extract_media_files(resp_text)
@@ -204,4 +222,6 @@ async def handle_document(message: types.Message, bot: Bot):
     except Exception as e:
         await safe_reply(message, f"❌ <b>Ошибка обработки файла:</b> <code>{html.escape(str(e))}</code>")
     finally:
+        if progress:
+            await progress.finish()
         session.active_runner = None

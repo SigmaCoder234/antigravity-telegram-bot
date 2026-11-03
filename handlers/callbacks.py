@@ -11,6 +11,8 @@ from utils import (
     get_system_info,
     get_persistent_keyboard,
     get_response_inline_keyboard,
+    send_agent_response,
+    ResponseProgress,
     safe_send_message,
     markdown_to_html,
     split_message,
@@ -403,7 +405,7 @@ async def cb_status(callback: types.CallbackQuery):
         f"• Статус квоты: <b>{quota_status}</b>\n"
         f"• Режим: <code>{session.mode}</code>\n"
         f"• Рабочий каталог: <code>{html.escape(session.cwd)}</code>\n"
-        f"• Conversation ID: <code>{session.conversation_id or '—'}</code>"
+        f"• Claude Session ID: <code>{(session.get_active_conv().claude_session_id if session.get_active_conv() else None) or '—'}</code>"
     )
     await callback.answer()
     await callback.message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
@@ -448,11 +450,7 @@ async def cb_choose_effort(callback: types.CallbackQuery):
     supports_eff = is_effort_supported_for_model(session.model)
     note = "" if supports_eff else f"\n\n<i>⚠️ Для текущей модели <code>{html.escape(session.model)}</code> уровень размышлений зафиксирован.</i>"
 
-    efforts = [
-        ("low", "Low (Быстрый ответ) ⚡"),
-        ("medium", "Medium (Сбалансированный) ⚖️"),
-        ("high", "High (Глубокое размышление) 🧠"),
-    ]
+    efforts = config.AVAILABLE_EFFORTS
     buttons = []
     for eid, elabel in efforts:
         prefix = "✅ " if session.effort == eid else ""
@@ -568,28 +566,31 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
     active_conv = session.get_active_conv()
     conv_title = active_conv.title if active_conv else "Диалог"
     
-    status_msg = await callback.message.answer(
-        f"🤖 <i>[Чат: «{html.escape(conv_title)}»] Выполняю подтвержденные действия...</i>",
-        parse_mode="HTML"
+    progress = ResponseProgress(
+        bot=callback.bot,
+        chat_id=callback.message.chat.id,
+        chat_type=callback.message.chat.type,
+        conv_title=conv_title,
+        cwd=session.cwd,
+        status_prefix_html=f"<i>[Чат: «{html.escape(conv_title)}»]</i>\n",
+        initial_status="🤖 <i>Выполняю подтвержденные действия...</i>",
     )
-
-    async def update_status(text: str):
-        try:
-            await status_msg.edit_text(f"<i>[Чат: «{html.escape(conv_title)}»]</i>\n{text}", parse_mode="HTML")
-        except Exception:
-            pass
 
     confirm_prompt = "Да, подтверждаю. Выполняй запланированные действия и команды."
     runner = AgentRunner(
         session=session,
         prompt=confirm_prompt,
         chat_id=callback.message.chat.id,
-        on_status=update_status
+        on_status=progress.on_status,
+        on_partial=progress.on_partial if progress.use_draft else None,
     )
+    progress.set_stop_callback(runner.cancel)
     session.active_runner = runner
 
     try:
+        await progress.start()
         result = await runner.run()
+        await progress.finish()
         resp_text = result.get("response", "") or "ℹ️ <i>Действие завершено.</i>"
         conv_id = result.get("conversation_id")
         
@@ -597,31 +598,18 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
         
         updated_conv = session.get_active_conv()
         current_title = updated_conv.title if updated_conv else "Диалог"
-        html_resp = markdown_to_html(resp_text)
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        chunks = split_message(html_resp)
-        if chunks:
-            badge = get_chat_badge(current_title, session.cwd)
-            chunks[0] = badge + chunks[0]
-
         is_review = (session.mode == "review")
         inline_kb = get_response_inline_keyboard(is_review_mode=is_review)
 
-        for i, chunk in enumerate(chunks):
-            is_last = (i == len(chunks) - 1)
-            kb = inline_kb if is_last else None
-            await safe_send_message(
-                bot=callback.bot,
-                chat_id=callback.message.chat.id,
-                text=chunk,
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
+        await send_agent_response(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            text=resp_text,
+            conv_title=current_title,
+            cwd=session.cwd,
+            reply_markup=inline_kb,
+            is_markdown=result.get("is_markdown", True),
+        )
 
         # Media files
         media_files = extract_media_files(resp_text)
@@ -645,6 +633,7 @@ async def cb_confirm_yes(callback: types.CallbackQuery):
             parse_mode="HTML"
         )
     finally:
+        await progress.finish()
         session.active_runner = None
 
 
